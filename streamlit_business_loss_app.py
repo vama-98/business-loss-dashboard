@@ -1,29 +1,17 @@
 # streamlit_business_loss_app.py
 # -----------------------------------------------------------
 # Business Loss Dashboard (Gemini-enabled)
-# - Upload 3 CSVs:
-#   1) Products: Title | Variant ID | Status
-#   2) Days OOS: Product title | Product variant ID | Days out of stock (at location)
-#   3) Rates: Variant ID | DRR | optional ASP
-# - Merge by Variant ID, keep Status == Active, exclude Days == 0
-# - Compute Business Loss per variant, plus Total
-# - Sort alphabetically (Product title or Variant ID)
-# - Download: variant-wise CSV, summary CSV, Excel (2 sheets)
-# - Natural language Q&A powered by Gemini (Google AI Studio)
+# Supports CSV and Excel (.xlsx, .xls) uploads
 #
 # Run:
 #   pip install --upgrade pip
-#   pip install streamlit pandas google-genai
+#   pip install streamlit pandas google-genai openpyxl xlsxwriter
 #   streamlit run streamlit_business_loss_app.py
-#
-# Provide your Gemini key via:
-# - Sidebar field (Gemini API Key), or
-# - Environment var: setx GEMINI_API_KEY "YOUR_KEY"  (Windows, then restart terminal)
-#                    export GEMINI_API_KEY="YOUR_KEY" (macOS/Linux)
 
 import os
 import io
 import json
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -39,23 +27,42 @@ REQ_RATES = {"Variant ID", "DRR"}  # ASP optional
 DAYS_COL = "Days out of stock (at location)"
 
 # ---------------------- Helpers ----------------------
-def read_csv_safely(uploaded_file, dtype=None):
-    """Read a CSV from Streamlit's UploadedFile with optional dtype mapping."""
+def read_file_safely(uploaded_file, dtype=None):
+    """Read CSV or Excel from Streamlit's uploader."""
     if uploaded_file is None:
         return None
+    name = uploaded_file.name.lower()
     try:
-        return pd.read_csv(uploaded_file, dtype=dtype)
-    except Exception:
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, encoding="utf-8", dtype=dtype)
+        if name.endswith(".csv"):
+            return pd.read_csv(uploaded_file, dtype=dtype)
+        elif name.endswith((".xlsx", ".xls")):
+            return pd.read_excel(uploaded_file, dtype=dtype, engine="openpyxl")
+        else:
+            st.error(f"Unsupported file type: {uploaded_file.name}")
+            return None
+    except Exception as e:
+        st.error(f"Error reading {uploaded_file.name}: {e}")
+        return None
 
-def normalize_id_series(s: pd.Series) -> pd.Series:
-    """Ensure IDs are strings, strip, drop trailing .0 to avoid sci-notation issues."""
-    if s is None:
-        return s
-    s = s.astype(str).str.strip()
-    s = s.str.replace(r"\.0$", "", regex=True)
+def normalize_id_value(x) -> str:
+    """Normalize Variant IDs (handle sci-notation, .0, commas)."""
+    if x is None:
+        return ""
+    s = str(x).strip().replace(",", "")
+    if s == "" or s.lower() in ("nan", "none"):
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    try:
+        if "e" in s.lower() or "." in s:
+            d = Decimal(s)
+            return str(d.to_integral_value(rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError):
+        pass
     return s
+
+def normalize_id_series(series: pd.Series) -> pd.Series:
+    return series.apply(normalize_id_value) if series is not None else series
 
 def validate_columns(df: pd.DataFrame, required: set, label: str) -> list:
     if df is None:
@@ -71,18 +78,22 @@ def rupee(n: float) -> str:
         return str(n)
 
 def dedupe_headers(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop duplicate header names, keep the first occurrence."""
     if df is None:
         return df
     df.columns = df.columns.str.strip()
     return df.loc[:, ~df.columns.duplicated()]
 
+def norm_title(s: pd.Series) -> pd.Series:
+    if s is None:
+        return s
+    return s.astype(str).str.strip().str.lower()
+
 # ---------------------- Sidebar ----------------------
 st.sidebar.markdown(f"<h2 style='color:{PRIMARY_COLOR}'>Settings</h2>", unsafe_allow_html=True)
 
-uploaded_products = st.sidebar.file_uploader("1) Upload Products CSV", type=["csv"], key="products")
-uploaded_days = st.sidebar.file_uploader("2) Upload Days OOS CSV", type=["csv"], key="days")
-uploaded_rates = st.sidebar.file_uploader("3) Upload Rates CSV", type=["csv"], key="rates")
+uploaded_products = st.sidebar.file_uploader("1) Upload Products file", type=["csv", "xlsx", "xls"], key="products")
+uploaded_days = st.sidebar.file_uploader("2) Upload Days OOS file", type=["csv", "xlsx", "xls"], key="days")
+uploaded_rates = st.sidebar.file_uploader("3) Upload Rates file", type=["csv", "xlsx", "xls"], key="rates")
 
 st.sidebar.divider()
 default_asp = st.sidebar.number_input("Default ASP (used if ASP missing)", min_value=0, value=250, step=10)
@@ -90,7 +101,6 @@ default_drr = st.sidebar.number_input("Default DRR (used if DRR missing)", min_v
 sort_by = st.sidebar.selectbox("Sort alphabetically by", ["Product title", "Variant ID"], index=0)
 
 st.sidebar.divider()
-# Resolve API key (env vars or secrets), but don't hard-code anything
 api_key_env = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
 try:
     api_key_secret = st.secrets["GEMINI_API_KEY"]
@@ -99,7 +109,7 @@ except Exception:
 api_key = api_key_env or api_key_secret
 api_key = st.sidebar.text_input("Gemini API Key (AI Studio)", type="password", value=api_key)
 model_name = st.sidebar.text_input("Model", value="gemini-2.5-flash")
-max_rows_for_context = st.sidebar.slider("Max rows to include in NL context", min_value=50, max_value=2000, value=300, step=50)
+max_rows_for_context = st.sidebar.slider("Max rows to include in NL context", 50, 2000, 300, 50)
 
 # ---------------------- Main Header ----------------------
 st.markdown(
@@ -111,14 +121,13 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-st.caption("Upload your three CSVs, and this app will compute variant-wise and total business loss. Then ask questions with Gemini.")
+st.caption("Upload your three files (CSV or Excel), and this app will compute variant-wise and total business loss. Then ask questions with Gemini.")
 
 # ---------------------- Read Files ----------------------
-products = read_csv_safely(uploaded_products, dtype={"Variant ID": str}) if uploaded_products else None
-days = read_csv_safely(uploaded_days, dtype={"Product variant ID": str}) if uploaded_days else None
-rates = read_csv_safely(uploaded_rates, dtype={"Variant ID": str}) if uploaded_rates else None
+products = read_file_safely(uploaded_products, dtype={"Variant ID": str}) if uploaded_products else None
+days = read_file_safely(uploaded_days, dtype={"Product variant ID": str}) if uploaded_days else None
+rates = read_file_safely(uploaded_rates, dtype={"Variant ID": str}) if uploaded_rates else None
 
-# Deduplicate any duplicate headers
 products = dedupe_headers(products)
 days = dedupe_headers(days)
 rates = dedupe_headers(rates)
@@ -136,22 +145,15 @@ if errors:
     st.stop()
 
 # ---------------------- Transform & Merge ----------------------
-# Normalize IDs (strings) and numeric days
 products["Variant ID"] = normalize_id_series(products["Variant ID"])
 rates["Variant ID"] = normalize_id_series(rates["Variant ID"])
+days["Variant ID"] = normalize_id_series(days["Product variant ID"])
 
 try:
     days[DAYS_COL] = pd.to_numeric(days[DAYS_COL], errors="coerce").fillna(0)
 except Exception:
     days[DAYS_COL] = 0
 
-# Build a SINGLE 'Variant ID' column for Days OOS without renaming into a duplicate
-vid_series = normalize_id_series(days["Product variant ID"])
-# Drop any pre-existing 'Variant ID' col to avoid duplicate header names
-days = days.drop(columns=[c for c in days.columns if c.strip().lower() == "variant id"], errors="ignore")
-days["Variant ID"] = vid_series
-
-# Join Days -> Products (get Status / Title), keep Active, exclude 0 days
 merged = days.merge(
     products[["Variant ID", "Status", "Title"]],
     on="Variant ID",
@@ -162,26 +164,20 @@ merged["Status"] = merged["Status"].astype(str)
 merged = merged[merged["Status"].str.strip().str.lower() == "active"]
 merged = merged[merged[DAYS_COL] > 0]
 
-# Prefer Product title from Days; fallback to Products Title if missing
 if "Product title" in merged.columns:
     merged["Product title"] = merged["Product title"].fillna(merged["Title"])
 else:
     merged["Product title"] = merged["Title"]
 
-# Add Rates (DRR, optional ASP)
 merged = merged.merge(rates, on="Variant ID", how="left")
-
-# Fill DRR/ASP fallbacks
 merged["DRR"] = pd.to_numeric(merged.get("DRR"), errors="coerce").fillna(default_drr)
 if "ASP" in merged.columns:
     merged["ASP"] = pd.to_numeric(merged.get("ASP"), errors="coerce").fillna(default_asp)
 else:
     merged["ASP"] = default_asp
 
-# Compute Business Loss
 merged["Business Loss"] = merged[DAYS_COL] * merged["DRR"] * merged["ASP"]
 
-# Arrange alphabetically
 if sort_by == "Product title":
     merged = merged.sort_values(["Product title", "Variant ID"], ascending=[True, True])
 else:
@@ -207,7 +203,7 @@ st.divider()
 st.subheader("Variant-wise Business Loss (sorted)")
 st.dataframe(final_df, use_container_width=True)
 
-# CSV downloads
+# CSV download
 csv_buffer = io.StringIO()
 final_df.to_csv(csv_buffer, index=False)
 st.download_button(
@@ -217,6 +213,7 @@ st.download_button(
     mime="text/csv",
 )
 
+# Summary download
 summary_df = pd.DataFrame({
     "Total Business Loss": [final_df["Business Loss"].sum()],
     "Total OOS Days": [final_df[DAYS_COL].sum()],
@@ -231,11 +228,11 @@ st.download_button(
     mime="text/csv",
 )
 
-# Excel (two sheets) — optional, if engine available
+# Excel download
 excel_bytes = None
 try:
     excel_bytes = io.BytesIO()
-    with pd.ExcelWriter(excel_bytes) as writer:  # engine auto-select
+    with pd.ExcelWriter(excel_bytes, engine="xlsxwriter") as writer:
         final_df.to_excel(writer, index=False, sheet_name="Variant-wise")
         summary_df.to_excel(writer, index=False, sheet_name="Summary")
     excel_bytes.seek(0)
@@ -271,9 +268,7 @@ st.subheader("Ask questions about this data (Gemini API)")
 question = st.text_area("Type your question (e.g., 'Which product has the highest loss?')", height=80)
 
 if st.button("Ask"):
-    # Resolve API key: sidebar > env vars
     gemini_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-
     if not gemini_key:
         st.warning("Please provide a Gemini API key in the sidebar or set GEMINI_API_KEY.")
     elif final_df.empty:
@@ -282,13 +277,9 @@ if st.button("Ask"):
         try:
             client = genai.Client(api_key=gemini_key)
 
-            # Compact context for token control
             sample_df = final_df.copy()
             if len(sample_df) > max_rows_for_context:
-                sample_df = (
-                    sample_df.sort_values("Business Loss", ascending=False)
-                    .head(max_rows_for_context)
-                )
+                sample_df = sample_df.sort_values("Business Loss", ascending=False).head(max_rows_for_context)
             context_csv = sample_df.to_csv(index=False)
             totals = {
                 "total_business_loss": float(final_df["Business Loss"].sum()),
@@ -301,7 +292,6 @@ if st.button("Ask"):
                 "Show computed numbers clearly. If not answerable from the data, say so."
             )
 
-            # Build prompt without multiline f-strings
             cols_str = ", ".join([str(c) for c in final_df.columns])
             totals_str = json.dumps(totals)
             user_prompt = "\n".join([
