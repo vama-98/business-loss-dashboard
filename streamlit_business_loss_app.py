@@ -1,25 +1,27 @@
 # streamlit_business_loss_app.py
 # -----------------------------------------------------------
 # Business Loss Dashboard (Gemini-enabled)
-# Supports CSV and Excel (.xlsx, .xls) uploads
-#
-# Run:
-#   pip install --upgrade pip
-#   pip install streamlit pandas google-genai openpyxl xlsxwriter
-#   streamlit run streamlit_business_loss_app.py
+# Supports CSV, Excel (.xlsx, .xls), or Google Sheets (hard-coded links)
 
 import os
 import io
 import json
+import requests
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import pandas as pd
-import numpy as np
 import streamlit as st
 from google import genai
 
 # ---------------------- Config ----------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
 PRIMARY_COLOR = "#7C3AED"
+
+# Hard-coded Google Sheet export URLs (replace with yours)
+SHEET_URL_PRODUCTS = "https://drive.google.com/uc?export=download&id=1kl7Y3LqS97LU1KWjJhmlRoQcJLfKR1JP"
+SHEET_URL_DAYS = "https://drive.google.com/uc?export=download&id=1DHCJBq44iqesVh5tMxf1Wqz8VXnqLG0N"
+SHEET_URL_RATES = "https://drive.google.com/uc?export=download&id=1swm6dfx_nV67QGE613_fbzL6b9eTtw0q"
+#SHEET_URL_PRODUCTS = "https://drive.google.com/uc?export=download&id=1DHCJBq44iqesVh5tMxf1Wqz8VXnqLG0N"
+
 
 REQ_PRODUCTS = {"Title", "Variant ID", "Status"}
 REQ_DAYS = {"Product title", "Product variant ID", "Days out of stock (at location)"}
@@ -42,6 +44,16 @@ def read_file_safely(uploaded_file, dtype=None):
             return None
     except Exception as e:
         st.error(f"Error reading {uploaded_file.name}: {e}")
+        return None
+
+def read_sheet_safely(url, dtype=None):
+    """Fetch Google Sheet as CSV via export link."""
+    try:
+        r = requests.get(url)
+        r.raise_for_status()
+        return pd.read_csv(io.BytesIO(r.content), dtype=dtype)
+    except Exception as e:
+        st.error(f"Error fetching sheet {url}: {e}")
         return None
 
 def normalize_id_value(x) -> str:
@@ -83,17 +95,18 @@ def dedupe_headers(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     return df.loc[:, ~df.columns.duplicated()]
 
-def norm_title(s: pd.Series) -> pd.Series:
-    if s is None:
-        return s
-    return s.astype(str).str.strip().str.lower()
-
 # ---------------------- Sidebar ----------------------
 st.sidebar.markdown(f"<h2 style='color:{PRIMARY_COLOR}'>Settings</h2>", unsafe_allow_html=True)
 
-uploaded_products = st.sidebar.file_uploader("1) Upload Products file", type=["csv", "xlsx", "xls"], key="products")
-uploaded_days = st.sidebar.file_uploader("2) Upload Days OOS file", type=["csv", "xlsx", "xls"], key="days")
-uploaded_rates = st.sidebar.file_uploader("3) Upload Rates file", type=["csv", "xlsx", "xls"], key="rates")
+input_mode = st.sidebar.selectbox("Input source", ["Upload files", "Auto upload for last month"])
+
+if input_mode == "Upload files":
+    uploaded_products = st.sidebar.file_uploader("1) Upload Products file", type=["csv", "xlsx", "xls"], key="products")
+    uploaded_days = st.sidebar.file_uploader("2) Upload Days OOS file", type=["csv", "xlsx", "xls"], key="days")
+    uploaded_rates = st.sidebar.file_uploader("3) Upload Rates file", type=["csv", "xlsx", "xls"], key="rates")
+else:
+    st.sidebar.info("Auto uploading. No upload needed.")
+    uploaded_products = uploaded_days = uploaded_rates = None
 
 st.sidebar.divider()
 default_asp = st.sidebar.number_input("Default ASP (used if ASP missing)", min_value=0, value=250, step=10)
@@ -111,33 +124,25 @@ api_key = st.sidebar.text_input("Gemini API Key (AI Studio)", type="password", v
 model_name = st.sidebar.text_input("Model", value="gemini-2.5-flash")
 max_rows_for_context = st.sidebar.slider("Max rows to include in NL context", 50, 2000, 300, 50)
 
-# ---------------------- Main Header ----------------------
-st.markdown(
-    f"""
-<div style='display:flex;align-items:center;gap:10px;'>
-  <div style='font-size:28px;font-weight:700;'>Business Loss Dashboard</div>
-  <div style='background:{PRIMARY_COLOR};color:white;padding:4px 10px;border-radius:999px;font-size:12px;'>Gemini-enabled</div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-st.caption("Upload your three files (CSV or Excel), and this app will compute variant-wise and total business loss. Then ask questions with Gemini.")
-
-# ---------------------- Read Files ----------------------
-products = read_file_safely(uploaded_products, dtype={"Variant ID": str}) if uploaded_products else None
-days = read_file_safely(uploaded_days, dtype={"Product variant ID": str}) if uploaded_days else None
-rates = read_file_safely(uploaded_rates, dtype={"Variant ID": str}) if uploaded_rates else None
+# ---------------------- Load Files ----------------------
+if input_mode == "Upload files":
+    products = read_file_safely(uploaded_products, dtype={"Variant ID": str}) if uploaded_products else None
+    days = read_file_safely(uploaded_days, dtype={"Product variant ID": str}) if uploaded_days else None
+    rates = read_file_safely(uploaded_rates, dtype={"Variant ID": str}) if uploaded_rates else None
+else:  # Google Sheets
+    products = read_sheet_safely(SHEET_URL_PRODUCTS, dtype={"Variant ID": str})
+    days = read_sheet_safely(SHEET_URL_DAYS, dtype={"Product variant ID": str})
+    rates = read_sheet_safely(SHEET_URL_RATES, dtype={"Variant ID": str})
 
 products = dedupe_headers(products)
 days = dedupe_headers(days)
 rates = dedupe_headers(rates)
 
-# Validate
+# ---------------------- Validation ----------------------
 errors = []
 errors += validate_columns(products, REQ_PRODUCTS, "Products")
 errors += validate_columns(days, REQ_DAYS, "Days OOS")
 errors += validate_columns(rates, REQ_RATES, "Rates")
-
 if errors:
     with st.expander("Validation & required columns", expanded=True):
         for e in errors:
@@ -154,12 +159,7 @@ try:
 except Exception:
     days[DAYS_COL] = 0
 
-merged = days.merge(
-    products[["Variant ID", "Status", "Title"]],
-    on="Variant ID",
-    how="inner",
-)
-
+merged = days.merge(products[["Variant ID", "Status", "Title"]], on="Variant ID", how="inner")
 merged["Status"] = merged["Status"].astype(str)
 merged = merged[merged["Status"].str.strip().str.lower() == "active"]
 merged = merged[merged[DAYS_COL] > 0]
@@ -179,140 +179,22 @@ else:
 merged["Business Loss"] = merged[DAYS_COL] * merged["DRR"] * merged["ASP"]
 
 if sort_by == "Product title":
-    merged = merged.sort_values(["Product title", "Variant ID"], ascending=[True, True])
+    merged = merged.sort_values(["Product title", "Variant ID"])
 else:
-    merged = merged.sort_values(["Variant ID", "Product title"], ascending=[True, True])
+    merged = merged.sort_values(["Variant ID", "Product title"])
 
 final_cols = ["Product title", "Variant ID", "Status", DAYS_COL, "DRR", "ASP", "Business Loss"]
 final_df = merged[final_cols].reset_index(drop=True)
 
 # ---------------------- KPIs ----------------------
 col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Unique Variants", int(final_df["Variant ID"].nunique()))
-with col2:
-    st.metric("Total OOS Days", int(final_df[DAYS_COL].sum()))
-with col3:
-    st.metric("Avg DRR", round(float(final_df["DRR"].mean()), 2))
-with col4:
-    st.metric("Total Business Loss", rupee(float(final_df["Business Loss"].sum())))
+with col1: st.metric("Unique Variants", int(final_df["Variant ID"].nunique()))
+with col2: st.metric("Total OOS Days", int(final_df[DAYS_COL].sum()))
+with col3: st.metric("Avg DRR", round(float(final_df["DRR"].mean()), 2))
+with col4: st.metric("Total Business Loss", rupee(float(final_df["Business Loss"].sum())))
 
 st.divider()
 
-# ---------------------- Tables & Downloads ----------------------
+# ---------------------- Table ----------------------
 st.subheader("Variant-wise Business Loss (sorted)")
 st.dataframe(final_df, use_container_width=True)
-
-# CSV download
-csv_buffer = io.StringIO()
-final_df.to_csv(csv_buffer, index=False)
-st.download_button(
-    label="↓ Download variant-wise CSV",
-    data=csv_buffer.getvalue(),
-    file_name="business_loss_variant_wise.csv",
-    mime="text/csv",
-)
-
-# Summary download
-summary_df = pd.DataFrame({
-    "Total Business Loss": [final_df["Business Loss"].sum()],
-    "Total OOS Days": [final_df[DAYS_COL].sum()],
-    "Unique Variants": [final_df["Variant ID"].nunique()],
-})
-sum_buffer = io.StringIO()
-summary_df.to_csv(sum_buffer, index=False)
-st.download_button(
-    label="↓ Download summary CSV",
-    data=sum_buffer.getvalue(),
-    file_name="business_loss_summary.csv",
-    mime="text/csv",
-)
-
-# Excel download
-excel_bytes = None
-try:
-    excel_bytes = io.BytesIO()
-    with pd.ExcelWriter(excel_bytes, engine="xlsxwriter") as writer:
-        final_df.to_excel(writer, index=False, sheet_name="Variant-wise")
-        summary_df.to_excel(writer, index=False, sheet_name="Summary")
-    excel_bytes.seek(0)
-except Exception:
-    excel_bytes = None
-
-if excel_bytes:
-    st.download_button(
-        label="↓ Download Excel (variant + summary)",
-        data=excel_bytes,
-        file_name="business_loss_report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-st.divider()
-
-# ---------------------- Chart ----------------------
-st.subheader("Top N SKUs by Business Loss")
-N = st.slider("Choose N", 5, 50, 15)
-chart_df = (
-    final_df[["Product title", "Business Loss"]]
-    .groupby("Product title", as_index=False)
-    .sum()
-    .sort_values("Business Loss", ascending=False)
-    .head(N)
-)
-st.bar_chart(chart_df.set_index("Product title"))
-
-st.divider()
-
-# ---------------------- Natural Language Q&A (Gemini) ----------------------
-st.subheader("Ask questions about this data (Gemini API)")
-question = st.text_area("Type your question (e.g., 'Which product has the highest loss?')", height=80)
-
-if st.button("Ask"):
-    gemini_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-    if not gemini_key:
-        st.warning("Please provide a Gemini API key in the sidebar or set GEMINI_API_KEY.")
-    elif final_df.empty:
-        st.info("No data to analyze. Please upload files above.")
-    else:
-        try:
-            client = genai.Client(api_key=gemini_key)
-
-            sample_df = final_df.copy()
-            if len(sample_df) > max_rows_for_context:
-                sample_df = sample_df.sort_values("Business Loss", ascending=False).head(max_rows_for_context)
-            context_csv = sample_df.to_csv(index=False)
-            totals = {
-                "total_business_loss": float(final_df["Business Loss"].sum()),
-                "total_oos_days": int(final_df[DAYS_COL].sum()),
-                "unique_variants": int(final_df["Variant ID"].nunique()),
-            }
-
-            sys_msg = (
-                "You are a careful retail/ops analyst. Answer ONLY using the provided CSV context. "
-                "Show computed numbers clearly. If not answerable from the data, say so."
-            )
-
-            cols_str = ", ".join([str(c) for c in final_df.columns])
-            totals_str = json.dumps(totals)
-            user_prompt = "\n".join([
-                f"Columns: {cols_str}",
-                f"Totals JSON: {totals_str}",
-                f"CSV Context (sample up to {len(sample_df)} rows):",
-                context_csv,
-                "",
-                f"Question: {question}",
-            ])
-
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=f"SYSTEM: {sys_msg}\n\n{user_prompt}"
-            )
-            answer = getattr(resp, "text", None) or str(resp)
-
-            st.success("Answer:")
-            st.write(answer)
-        except Exception as e:
-            st.error(f"Gemini error: {e}")
-
-# ---------------------- Footer ----------------------
-st.caption("© Business Loss Dashboard — Upload, merge, compute, and ask.")
