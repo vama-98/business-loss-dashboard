@@ -20,7 +20,7 @@ PRIMARY_COLOR = "#7C3AED"
 
 # Hard-coded Google Sheet export URLs (replace with your IDs)
 SHEET_URL_PRODUCTS = "https://drive.google.com/uc?export=download&id=1kl7Y3LqS97LU1KWjJhmlRoQcJLfKR1JP"
-SHEET_URL_DAYS = "https://drive.google.com/uc?export=download&id=1DHCJBq44iqesVh5tMxf1Wqz8VXnqLG0N"
+SHEET_URL_DAYS = "https://docs.google.com/spreadsheets/d/1x9cLhNDIfkIozv1I5jB1R9Dny4ytVhZQpwhIjdz8ox8/export?format=csv&gid=1562072337"
 SHEET_URL_RATES = "https://drive.google.com/uc?export=download&id=1swm6dfx_nV67QGE613_fbzL6b9eTtw0q"
 
 REQ_PRODUCTS = {"Title", "Variant ID", "Status"}
@@ -320,3 +320,4 @@ if st.button("Ask"):
 
 # ---------------------- Footer ----------------------
 st.caption("© Business Loss Dashboard — Upload, auto-fetch, compute, and ask.")
+
