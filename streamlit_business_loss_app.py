@@ -105,7 +105,7 @@ if input_mode == "Upload files":
     uploaded_days = st.sidebar.file_uploader("2) Upload Days OOS file", type=["csv", "xlsx", "xls"], key="days")
     uploaded_rates = st.sidebar.file_uploader("3) Upload Rates file", type=["csv", "xlsx", "xls"], key="rates")
 else:
-    st.sidebar.info("Auto uploading from Google Drive links.")
+    st.sidebar.info("Auto uploading.")
     uploaded_products = uploaded_days = uploaded_rates = None
 
 st.sidebar.divider()
