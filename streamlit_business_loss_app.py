@@ -115,7 +115,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
 # STREAMLIT DASHBOARD
 # -------------------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
-st.title("💸 Business Loss Dashboard (Optimized, No Shopify API)")
+st.title("💸 Business Loss Dashboard")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -167,3 +167,4 @@ if st.button("🚀 Calculate Business Loss"):
         top_loss = report.sort_values("business_loss", ascending=False).head(5)
         st.markdown("### 💥 Top 5 Variants with Maximum Loss")
         st.table(top_loss[["variant_label", "days_out_of_stock", "drr", "asp", "business_loss"]])
+
