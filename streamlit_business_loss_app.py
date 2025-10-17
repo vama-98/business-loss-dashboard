@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import math
 
 # -------------------------------
 # CONFIG
@@ -78,7 +79,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     latest_inv = (
         tidy.sort_values("timestamp")
         .groupby("variant_id")
-        .tail(1)[["variant_id", "inventory"]]
+        .tail(1)[["variant_id", "inventory", "status"]]
         .rename(columns={"inventory": "latest_inventory"})
     )
 
@@ -88,7 +89,6 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     arr_drr = pd.read_csv(arr_drr_url)
     arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
 
-    # Validate presence of key columns
     required_cols = {"variant_id", "drr", "asp", "product_title"}
     missing = required_cols - set(arr_drr.columns)
     if missing:
@@ -104,7 +104,10 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     report["latest_inventory"] = pd.to_numeric(report.get("latest_inventory", 0), errors="coerce").fillna(0)
 
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
-    report["doh"] = report.apply(lambda x: x["latest_inventory"] / x["drr"] if x["drr"] > 0 else None, axis=1)
+    report["doh"] = report.apply(
+        lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else None,
+        axis=1
+    )
 
     report["variant_label"] = report.apply(
         lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else x["variant_id"],
@@ -133,9 +136,6 @@ if st.button("🚀 Calculate Business Loss"):
     if report.empty:
         st.warning("⚠️ No data available for this range.")
     else:
-        # Filter SKUs with >0 business loss
-        report = report[report["business_loss"] > 0]
-
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Unique Variants", report["variant_id"].nunique())
         c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
@@ -144,23 +144,44 @@ if st.button("🚀 Calculate Business Loss"):
 
         st.markdown("---")
 
-        st.subheader("📋 Variant-wise Business Loss")
+        st.subheader("📋 Variant-wise Business Loss (All SKUs)")
 
-        # Highlight DOH < 28
-        def highlight_low_doh(row):
-            color = "background-color: #ffb3b3" if row["doh"] is not None and row["doh"] < 28 else ""
+        # -------------------------------
+        # Highlighting logic
+        # -------------------------------
+        def highlight_doh(row):
+            color = ""
+            if row["status"] == "active":
+                if row["latest_inventory"] == 0:
+                    color = "background-color: #ffb3b3"      # red
+                elif row["doh"] is not None and 1 <= row["doh"] <= 7:
+                    color = "background-color: #ffcc80"      # orange
+                elif row["doh"] is not None and 8 <= row["doh"] <= 15:
+                    color = "background-color: #fff6a5"      # yellow
             return [color] * len(row)
 
-        styled_df = report[["variant_label", "days_out_of_stock", "drr", "asp", "latest_inventory", "doh", "business_loss"]]\
-            .style.apply(highlight_low_doh, axis=1)\
-            .format({"drr": "{:.1f}", "asp": "₹{:.0f}", "latest_inventory": "{:.0f}", "doh": "{:.1f}", "business_loss": "₹{:.0f}"})
+        styled_df = (
+            report[[
+                "variant_label", "status", "latest_inventory",
+                "doh", "days_out_of_stock", "drr", "asp", "business_loss"
+            ]]
+            .style.apply(highlight_doh, axis=1)
+            .format({
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}",
+                "drr": "{:.1f}",
+                "asp": "₹{:.0f}",
+                "business_loss": "₹{:.0f}"
+            })
+        )
 
         st.dataframe(styled_df, use_container_width=True)
 
         st.subheader("📊 Contribution to Total Business Loss (Only >0%)")
-        if not report.empty:
+        pie_df = report[report["business_loss"] > 0]
+        if not pie_df.empty:
             fig2 = px.pie(
-                report,
+                pie_df,
                 names="variant_label",
                 values="business_loss",
                 title="Contribution to Total Business Loss (SKUs > 0%)",
