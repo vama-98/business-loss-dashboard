@@ -179,7 +179,7 @@ if st.button("🚀 Calculate Business Loss"):
 
         st.dataframe(styled_df, use_container_width=True)
 
-        st.subheader("📊 Contribution to Total Business Loss (Only >0%)")
+        st.subheader("📊 Contribution to Total Business Loss")
         pie_df = report[report["business_loss"] > 0]
         if not pie_df.empty:
             fig2 = px.pie(
@@ -190,3 +190,4 @@ if st.button("🚀 Calculate Business Loss"):
                 color_discrete_sequence=px.colors.sequential.RdBu
             )
             st.plotly_chart(fig2, use_container_width=True)
+
