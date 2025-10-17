@@ -98,10 +98,13 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp"]], on="variant_id", how="left")
 
-    # Compute business loss
+    # Compute business loss and DOH
     report["drr"] = pd.to_numeric(report.get("drr", 0), errors="coerce").fillna(0)
     report["asp"] = pd.to_numeric(report.get("asp", 0), errors="coerce").fillna(0)
+    report["latest_inventory"] = pd.to_numeric(report.get("latest_inventory", 0), errors="coerce").fillna(0)
+
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
+    report["doh"] = report.apply(lambda x: x["latest_inventory"] / x["drr"] if x["drr"] > 0 else None, axis=1)
 
     report["variant_label"] = report.apply(
         lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else x["variant_id"],
@@ -130,6 +133,9 @@ if st.button("🚀 Calculate Business Loss"):
     if report.empty:
         st.warning("⚠️ No data available for this range.")
     else:
+        # Filter SKUs with >0 business loss
+        report = report[report["business_loss"] > 0]
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Unique Variants", report["variant_id"].nunique())
         c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
@@ -139,32 +145,25 @@ if st.button("🚀 Calculate Business Loss"):
         st.markdown("---")
 
         st.subheader("📋 Variant-wise Business Loss")
-        st.dataframe(
-            report[["variant_label", "days_out_of_stock", "drr", "asp", "business_loss"]],
-            use_container_width=True
-        )
 
-        st.subheader("📊 Visual Insights")
+        # Highlight DOH < 28
+        def highlight_low_doh(row):
+            color = "background-color: #ffb3b3" if row["doh"] is not None and row["doh"] < 28 else ""
+            return [color] * len(row)
 
-        fig1 = px.bar(
-            report.sort_values("business_loss", ascending=False).head(15),
-            x="variant_label", y="business_loss",
-            title="Top 15 Variants by Business Loss",
-            text_auto=".2s", color="business_loss",
-            color_continuous_scale="Reds"
-        )
-        st.plotly_chart(fig1, use_container_width=True)
+        styled_df = report[["variant_label", "days_out_of_stock", "drr", "asp", "latest_inventory", "doh", "business_loss"]]\
+            .style.apply(highlight_low_doh, axis=1)\
+            .format({"drr": "{:.1f}", "asp": "₹{:.0f}", "latest_inventory": "{:.0f}", "doh": "{:.1f}", "business_loss": "₹{:.0f}"})
 
-        fig2 = px.pie(
-            report,
-            names="variant_label",
-            values="business_loss",
-            title="Contribution to Total Loss",
-            color_discrete_sequence=px.colors.sequential.RdBu
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.dataframe(styled_df, use_container_width=True)
 
-        top_loss = report.sort_values("business_loss", ascending=False).head(5)
-        st.markdown("### 💥 Top 5 Variants with Maximum Loss")
-        st.table(top_loss[["variant_label", "days_out_of_stock", "drr", "asp", "business_loss"]])
-
+        st.subheader("📊 Contribution to Total Business Loss (Only >0%)")
+        if not report.empty:
+            fig2 = px.pie(
+                report,
+                names="variant_label",
+                values="business_loss",
+                title="Contribution to Total Business Loss (SKUs > 0%)",
+                color_discrete_sequence=px.colors.sequential.RdBu
+            )
+            st.plotly_chart(fig2, use_container_width=True)
