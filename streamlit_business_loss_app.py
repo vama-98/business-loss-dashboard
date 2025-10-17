@@ -64,11 +64,14 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     if tidy.empty:
         return pd.DataFrame(), pd.DataFrame()
 
+    # Only keep active variants
+    tidy = tidy[tidy["status"] == "active"]
+
     all_variants = tidy["variant_id"].unique()
 
     # ✅ Days out of stock where product is active
     oos_days = (
-        tidy[(tidy["status"] == "active") & (tidy["inventory"] == 0)]
+        tidy[tidy["inventory"] == 0]
         .groupby("variant_id")
         .size()
         .reindex(all_variants, fill_value=0)
@@ -79,7 +82,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     latest_inv = (
         tidy.sort_values("timestamp")
         .groupby("variant_id")
-        .tail(1)[["variant_id", "inventory", "status"]]
+        .tail(1)[["variant_id", "inventory"]]
         .rename(columns={"inventory": "latest_inventory"})
     )
 
@@ -98,7 +101,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp"]], on="variant_id", how="left")
 
-    # Compute business loss and DOH
+    # Compute business loss and DOH (rounded up)
     report["drr"] = pd.to_numeric(report.get("drr", 0), errors="coerce").fillna(0)
     report["asp"] = pd.to_numeric(report.get("asp", 0), errors="coerce").fillna(0)
     report["latest_inventory"] = pd.to_numeric(report.get("latest_inventory", 0), errors="coerce").fillna(0)
@@ -144,25 +147,24 @@ if st.button("🚀 Calculate Business Loss"):
 
         st.markdown("---")
 
-        st.subheader("📋 Variant-wise Business Loss (All SKUs)")
+        st.subheader("📋 Variant-wise Business Loss (Active SKUs Only)")
 
         # -------------------------------
         # Highlighting logic
         # -------------------------------
         def highlight_doh(row):
             color = ""
-            if row["status"] == "active":
-                if row["latest_inventory"] == 0:
-                    color = "background-color: #ffb3b3"      # red
-                elif row["doh"] is not None and 1 <= row["doh"] <= 7:
-                    color = "background-color: #ffcc80"      # orange
-                elif row["doh"] is not None and 8 <= row["doh"] <= 15:
-                    color = "background-color: #fff6a5"      # yellow
+            if row["latest_inventory"] == 0:
+                color = "background-color: #ffb3b3"      # red (OOS)
+            elif row["doh"] is not None and 1 <= row["doh"] <= 7:
+                color = "background-color: #ffcc80"      # orange
+            elif row["doh"] is not None and 8 <= row["doh"] <= 15:
+                color = "background-color: #fff6a5"      # yellow
             return [color] * len(row)
 
         styled_df = (
             report[[
-                "variant_label", "status", "latest_inventory",
+                "variant_label", "latest_inventory",
                 "doh", "days_out_of_stock", "drr", "asp", "business_loss"
             ]]
             .style.apply(highlight_doh, axis=1)
@@ -184,7 +186,7 @@ if st.button("🚀 Calculate Business Loss"):
                 pie_df,
                 names="variant_label",
                 values="business_loss",
-                title="Contribution to Total Business Loss (SKUs > 0%)",
+                title="Contribution to Total Business Loss (Active SKUs)",
                 color_discrete_sequence=px.colors.sequential.RdBu
             )
             st.plotly_chart(fig2, use_container_width=True)
