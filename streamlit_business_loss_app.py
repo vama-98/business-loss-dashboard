@@ -156,7 +156,7 @@ if st.button("🚀 Calculate Business Loss"):
             color = ""
             if row["latest_inventory"] == 0:
                 color = "background-color: #FFC7C7"      # red (OOS)
-            elif row["doh"] is not None and 1 <= row["doh"] <= 7:
+            elif row["doh"] is not None and -1 <= row["doh"] <= 7:
                 color = "background-color: #FFC7C7"      # red
             elif row["doh"] is not None and 8 <= row["doh"] <= 15:
                 color = "background-color: #fff6a5"      # yellow
@@ -190,6 +190,7 @@ if st.button("🚀 Calculate Business Loss"):
                 color_discrete_sequence=px.colors.sequential.RdBu
             )
             st.plotly_chart(fig2, use_container_width=True)
+
 
 
 
