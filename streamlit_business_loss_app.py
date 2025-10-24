@@ -100,7 +100,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else None, axis=1)
 
     # -------------------------------
-    # B2B INVENTORY MERGE (Fixed for your sheet)
+    # B2B INVENTORY MERGE (Auto SKU detection)
     # -------------------------------
     lookup = pd.read_csv(LOOKUP_URL)
     lookup.columns = lookup.columns.str.strip().str.lower().str.replace(" ", "_")
@@ -108,26 +108,32 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     lookup["variant_id"] = lookup["variant_id"].astype(str)
     lookup["sku"] = lookup["sku"].fillna("").astype(str).str.strip()
 
-    # B2B sheet uses SKU headers on row 2
+    # Read B2B sheet (headers start from row 2)
     b2b = pd.read_csv(B2B_INVENTORY_URL, header=1, dtype=str)
     b2b.columns = b2b.columns.map(str).str.strip().str.lower().str.replace(" ", "_")
 
-    # Detect date columns (like 24-10, 23-10...)
+    # Dynamically detect the SKU column
+    possible_sku_cols = [c for c in b2b.columns if "sku" in c]
+    if not possible_sku_cols:
+        raise KeyError("❌ Could not find any column containing 'SKU' in the B2B sheet.")
+    sku_col = possible_sku_cols[0]
+
+    # Detect date columns (like 17-07, 24-10)
     date_cols = [c for c in b2b.columns if any(ch.isdigit() for ch in c)]
-    latest_col = sorted(date_cols,
-                        key=lambda x: pd.to_datetime(x, format="%d-%m", errors="ignore"))[-1]
+    latest_col = sorted(date_cols, key=lambda x: pd.to_datetime(x, format="%d-%m", errors="ignore"))[-1]
 
-    # Convert to long form and extract latest
-    b2b_long = b2b.melt(id_vars=["sku_code"], value_vars=date_cols,
-                        var_name="date", value_name="inventory")
-    b2b_latest = b2b_long[b2b_long["date"] == latest_col][["sku_code", "inventory"]]
-    b2b_latest.rename(columns={"sku_code": "sku", "inventory": "b2b_inventory"}, inplace=True)
-    b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"],
-                                                errors="coerce").fillna(0)
+    # Melt to long format
+    b2b_long = b2b.melt(id_vars=[sku_col], value_vars=date_cols, var_name="date", value_name="inventory")
+    b2b_latest = b2b_long[b2b_long["date"] == latest_col][[sku_col, "inventory"]]
+    b2b_latest.rename(columns={sku_col: "sku", "inventory": "b2b_inventory"}, inplace=True)
+    b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
-    # Merge
+    # Merge with Lookup and main report
     report = report.merge(lookup, on="variant_id", how="left").merge(b2b_latest, on="sku", how="left")
     report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
+
+    # Optional debug
+    # st.write("🧩 Latest B2B snapshot:", b2b_latest.head())
 
     report["variant_label"] = report.apply(
         lambda x: f"{x['product_title']} ({x['variant_id']})"
