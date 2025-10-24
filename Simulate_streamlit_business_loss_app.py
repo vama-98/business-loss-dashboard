@@ -199,6 +199,80 @@ if report is not None and not report.empty:
         })
     )
 
+    if report.empty:
+        st.warning("⚠️ No data available for this range.")
+    else:
+        # -------------------------------
+        # MAIN METRICS
+        # -------------------------------
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Unique Variants", report["variant_id"].nunique())
+        c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
+        c3.metric("Avg DRR", round(report["drr"].mean(), 1))
+        c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
+
+        st.markdown("---")
+        st.subheader("📋 Variant-wise Business Loss (Active SKUs Only)")
+
+        # -------------------------------
+        # Highlighting logic
+        # -------------------------------
+        def highlight_doh(row):
+            color = ""
+            if row["latest_inventory"] == 0:
+                color = "background-color: #FFC7C7"  # red
+            elif row["doh"] is not None and row["doh"] <= 7:
+                color = "background-color: #FFC7C7"  # red
+            elif row["doh"] is not None and 8 <= row["doh"] <= 15:
+                color = "background-color: #fff6a5"  # yellow
+            return [color] * len(row)
+
+        styled_df = (
+            report[[
+                "variant_label", "latest_inventory", "b2b_inventory",
+                "doh", "days_out_of_stock", "drr", "asp", "business_loss"
+            ]]
+            .style.apply(highlight_doh, axis=1)
+            .format({
+                "latest_inventory": "{:.0f}",
+                "b2b_inventory": "{:.0f}",
+                "doh": "{:.0f}",
+                "drr": "{:.1f}",
+                "asp": "₹{:.0f}",
+                "business_loss": "₹{:.0f}"
+            })
+        )
+
+        st.dataframe(styled_df, use_container_width=True)
+
+        # -------------------------------
+        # PIE CHART
+        # -------------------------------
+        st.subheader("📊 Contribution to Total Business Loss")
+        pie_df = report[report["business_loss"] > 0]
+        if not pie_df.empty:
+            fig2 = px.pie(
+                pie_df,
+                names="variant_label",
+                values="business_loss",
+                title="Contribution to Total Business Loss (Active SKUs)",
+                color_discrete_sequence=px.colors.sequential.RdBu
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # -------------------------------
+        # SIDEBAR: BLOCK INVENTORY SIMULATION
+        # -------------------------------
+        st.sidebar.markdown("## 🧱 Block Inventory (Simulation)")
+        selected_product = st.sidebar.selectbox(
+            "Select Product",
+            options=report["variant_label"].tolist()
+        )
+        qty_to_block = st.sidebar.number_input(
+            "Enter Quantity to Block",
+            min_value=0,
+            value=0,
+            step=1
     st.dataframe(styled_df, use_container_width=True)
 
     # -------------------------------
@@ -217,42 +291,6 @@ if report is not None and not report.empty:
         st.plotly_chart(fig2, use_container_width=True)
 
     # -------------------------------
-    # 🥇 TOP & BOTTOM D2C PERFORMERS
-    # -------------------------------
-    st.markdown("---")
-    st.subheader("🏆 D2C Performance Insights")
-
-    col_left, col_right = st.columns(2)
-
-    drr_df = report[["variant_label", "drr", "latest_inventory", "doh"]].copy()
-    drr_df["drr"] = pd.to_numeric(drr_df["drr"], errors="coerce").fillna(0)
-
-    top5 = drr_df.sort_values("drr", ascending=False).head(5)
-    bottom5 = drr_df[drr_df["drr"] > 0].sort_values("drr", ascending=True).head(5)
-
-    with col_left:
-        st.markdown("### 🥇 Top 5 D2C Performers")
-        st.dataframe(
-            top5.style.format({
-                "drr": "{:.1f}",
-                "latest_inventory": "{:.0f}",
-                "doh": "{:.0f}"
-            }),
-            use_container_width=True
-        )
-
-    with col_right:
-        st.markdown("### 🪫 Bottom 5 D2C Performers")
-        st.dataframe(
-            bottom5.style.format({
-                "drr": "{:.1f}",
-                "latest_inventory": "{:.0f}",
-                "doh": "{:.0f}"
-            }),
-            use_container_width=True
-        )
-
-    # -------------------------------
     # SIDEBAR SIMULATION
     # -------------------------------
     st.sidebar.markdown("## 🧱 Block Inventory (Simulation)")
@@ -267,11 +305,17 @@ if report is not None and not report.empty:
         step=1
     )
 
+        if st.sidebar.button("Simulate Impact"):
+            row = report.loc[report["variant_label"] == selected_product].iloc[0]
+            latest_inv = row["latest_inventory"]
+            drr = row["drr"]
     if st.sidebar.button("Simulate Impact"):
         row = report.loc[report["variant_label"] == selected_product].iloc[0]
         latest_inv = row["latest_inventory"]
         drr = row["drr"]
 
+            if drr <= 0:
+                st.sidebar.error("❌ Invalid DRR — cannot simulate impact.")
         if drr <= 0:
             st.sidebar.error("❌ Invalid DRR — cannot simulate impact.")
         else:
@@ -282,6 +326,18 @@ if report is not None and not report.empty:
                     f"Current DOH after block: **{new_doh} days**"
                 )
             else:
+                new_doh = math.ceil((latest_inv - qty_to_block) / drr)
+                if new_doh < 15:
+                    st.sidebar.warning(
+                        f"⚠️ Blocking this inventory will result in low inventory levels for D2C.\n\n"
+                        f"Current DOH after block: **{new_doh} days**"
+                    )
+                else:
+                    st.sidebar.success(
+                        f"✅ Blocking inventory may not result in business loss.\n\n"
+                        f"Current DOH after block: **{new_doh} days**\n\n"
+                        f"You can connect with the SCM team to block."
+                    )
                 st.sidebar.success(
                     f"✅ Blocking inventory may not result in business loss.\n\n"
                     f"Current DOH after block: **{new_doh} days**\n\n"
