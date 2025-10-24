@@ -106,21 +106,33 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     # -------------------------------
     # B2B INVENTORY MERGE (Robust)
     # -------------------------------
-    lookup = pd.read_csv(LOOKUP_URL)
-    lookup.columns = lookup.columns.str.strip().str.lower().str.replace(" ", "_")
+# -------------------------------
+# B2B INVENTORY MERGE (Robust)
+# -------------------------------
+lookup = pd.read_csv(LOOKUP_URL)
+lookup.columns = lookup.columns.str.strip().str.lower().str.replace(" ", "_")
+lookup.rename(columns={
+    "product_variant_id": "variant_id",
+    "product_variant_sku": "sku"
+}, inplace=True)
+lookup["variant_id"] = lookup["variant_id"].astype(str)
+lookup["sku"] = lookup["sku"].fillna("").astype(str).str.strip()
 
-    lookup.rename(columns={
-        "product_variant_id": "variant_id",
-        "product_variant_sku": "sku"
-    }, inplace=True)
-    lookup["variant_id"] = lookup["variant_id"].astype(str)
-    lookup["sku"] = lookup["sku"].fillna("").astype(str).str.strip()
+b2b = pd.read_csv(B2B_INVENTORY_URL, dtype=str)  # force all headers as strings
+b2b.columns = b2b.columns.map(str).str.strip().str.lower().str.replace(" ", "_")
 
-    b2b = pd.read_csv(B2B_INVENTORY_URL)
-    b2b.columns = b2b.columns.str.strip().str.lower().str.replace(" ", "_")
+# Detect SKU column (works for "sku_code" or "sku")
+sku_col = [c for c in b2b.columns if "sku" in c][0]
 
-    # Detect SKU column (works for "sku_code" or "sku")
-    sku_col = [c for c in b2b.columns if "sku" in c][0]
+# Convert all headers to string before date detection
+date_cols = [str(c) for c in b2b.columns if any(ch.isdigit() for ch in str(c))]
+latest_col = sorted(date_cols, key=lambda x: pd.to_datetime(x, format="%d-%m", errors="ignore"))[-1]
+
+b2b_inv = b2b[[sku_col, latest_col]].rename(columns={sku_col: "sku", latest_col: "b2b_inventory"})
+b2b_inv["b2b_inventory"] = pd.to_numeric(b2b_inv["b2b_inventory"], errors="coerce").fillna(0)
+
+report = report.merge(lookup, on="variant_id", how="left").merge(b2b_inv, on="sku", how="left")
+report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
 
     # Find latest date column
     date_cols = [c for c in b2b.columns if any(ch.isdigit() for ch in c)]
@@ -222,3 +234,4 @@ if st.button("🚀 Calculate Business Loss"):
                 color_discrete_sequence=px.colors.sequential.RdBu
             )
             st.plotly_chart(fig2, use_container_width=True)
+
