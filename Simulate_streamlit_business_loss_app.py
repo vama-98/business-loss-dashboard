@@ -217,6 +217,42 @@ if report is not None and not report.empty:
         st.plotly_chart(fig2, use_container_width=True)
 
     # -------------------------------
+    # 🥇 TOP & BOTTOM D2C PERFORMERS
+    # -------------------------------
+    st.markdown("---")
+    st.subheader("🏆 D2C Performance Insights")
+
+    col_left, col_right = st.columns(2)
+
+    drr_df = report[["variant_label", "drr", "latest_inventory", "doh"]].copy()
+    drr_df["drr"] = pd.to_numeric(drr_df["drr"], errors="coerce").fillna(0)
+
+    top5 = drr_df.sort_values("drr", ascending=False).head(5)
+    bottom5 = drr_df[drr_df["drr"] > 0].sort_values("drr", ascending=True).head(5)
+
+    with col_left:
+        st.markdown("### 🥇 Top 5 D2C Performers")
+        st.dataframe(
+            top5.style.format({
+                "drr": "{:.1f}",
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}"
+            }),
+            use_container_width=True
+        )
+
+    with col_right:
+        st.markdown("### 🪫 Bottom 5 D2C Performers")
+        st.dataframe(
+            bottom5.style.format({
+                "drr": "{:.1f}",
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}"
+            }),
+            use_container_width=True
+        )
+
+    # -------------------------------
     # SIDEBAR SIMULATION
     # -------------------------------
     st.sidebar.markdown("## 🧱 Block Inventory (Simulation)")
