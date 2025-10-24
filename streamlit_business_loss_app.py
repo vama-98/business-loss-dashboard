@@ -8,14 +8,16 @@ import math
 # -------------------------------
 INVENTORY_URL = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=0"
 ARR_DRR_URL   = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=1079657777"
+LOOKUP_URL    = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=635962983"
 B2B_INVENTORY_URL = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=2131638248"
-LOOKUP_URL = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=635962983"
 
 # -------------------------------
 # FUNCTIONS
 # -------------------------------
 def reshape_inventory(sheet_url, start_date=None, end_date=None):
+    """Reshape D2C inventory data into tidy format."""
     df = pd.read_csv(sheet_url, header=[0, 1])
+
     new_cols, last_variant = [], None
     for top, sub in df.columns:
         top, sub = str(top).strip().lower(), str(sub).strip().lower()
@@ -34,9 +36,12 @@ def reshape_inventory(sheet_url, start_date=None, end_date=None):
 
     long_df = df.melt(id_vars=["timestamp", "date"], var_name="variant_field", value_name="value")
     long_df[["variant_id", "field"]] = long_df["variant_field"].str.rsplit("_", n=1, expand=True)
-    tidy = long_df.pivot_table(index=["timestamp", "date", "variant_id"], columns="field", values="value", aggfunc="first").reset_index()
-    tidy.columns = [str(c).strip().lower() for c in tidy.columns]
 
+    tidy = long_df.pivot_table(index=["timestamp", "date", "variant_id"],
+                               columns="field",
+                               values="value",
+                               aggfunc="first").reset_index()
+    tidy.columns = [str(c).strip().lower() for c in tidy.columns]
     tidy["inventory"] = pd.to_numeric(tidy.get("inventory", 0), errors="coerce").fillna(0)
     tidy["status"] = tidy.get("status", "").astype(str).str.lower()
 
@@ -46,7 +51,6 @@ def reshape_inventory(sheet_url, start_date=None, end_date=None):
     if end_date:
         end_date = pd.to_datetime(end_date).date()
         tidy = tidy[tidy["date"] <= end_date]
-
     return tidy
 
 
@@ -55,11 +59,9 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     if tidy.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    tidy = tidy[tidy["status"] == "active"]  # Only active products
-
+    tidy = tidy[tidy["status"] == "active"]  # Only active variants
     all_variants = tidy["variant_id"].unique()
 
-    # Out-of-stock days
     oos_days = (
         tidy[tidy["inventory"] == 0]
         .groupby("variant_id")
@@ -68,7 +70,6 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
         .reset_index(name="days_out_of_stock")
     )
 
-    # Latest inventory
     latest_inv = (
         tidy.sort_values("timestamp")
         .groupby("variant_id")
@@ -88,17 +89,18 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
 
     report["variant_id"] = report["variant_id"].astype(str)
     arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
-    report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp"]], on="variant_id", how="left")
+    report = pd.merge(report,
+                      arr_drr[["variant_id", "product_title", "drr", "asp"]],
+                      on="variant_id", how="left")
 
-    report["drr"] = pd.to_numeric(report.get("drr", 0), errors="coerce").fillna(0)
-    report["asp"] = pd.to_numeric(report.get("asp", 0), errors="coerce").fillna(0)
-    report["latest_inventory"] = pd.to_numeric(report.get("latest_inventory", 0), errors="coerce").fillna(0)
-
+    report["drr"] = pd.to_numeric(report["drr"], errors="coerce").fillna(0)
+    report["asp"] = pd.to_numeric(report["asp"], errors="coerce").fillna(0)
+    report["latest_inventory"] = pd.to_numeric(report["latest_inventory"], errors="coerce").fillna(0)
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
     report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else None, axis=1)
 
     # -------------------------------
-    # B2B INVENTORY MERGE
+    # B2B INVENTORY MERGE (Fixed for your sheet)
     # -------------------------------
     lookup = pd.read_csv(LOOKUP_URL)
     lookup.columns = lookup.columns.str.strip().str.lower().str.replace(" ", "_")
@@ -106,22 +108,30 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     lookup["variant_id"] = lookup["variant_id"].astype(str)
     lookup["sku"] = lookup["sku"].fillna("").astype(str).str.strip()
 
-    b2b = pd.read_csv(B2B_INVENTORY_URL, dtype=str)
+    # B2B sheet uses SKU headers on row 2
+    b2b = pd.read_csv(B2B_INVENTORY_URL, header=1, dtype=str)
     b2b.columns = b2b.columns.map(str).str.strip().str.lower().str.replace(" ", "_")
 
-    sku_col = [c for c in b2b.columns if "sku" in c][0]
-    date_cols = [str(c) for c in b2b.columns if any(ch.isdigit() for ch in str(c))]
-    latest_col = sorted(date_cols, key=lambda x: pd.to_datetime(x, format="%d-%m", errors="ignore"))[-1]
+    # Detect date columns (like 24-10, 23-10...)
+    date_cols = [c for c in b2b.columns if any(ch.isdigit() for ch in c)]
+    latest_col = sorted(date_cols,
+                        key=lambda x: pd.to_datetime(x, format="%d-%m", errors="ignore"))[-1]
 
-    b2b_inv = b2b[[sku_col, latest_col]].rename(columns={sku_col: "sku", latest_col: "b2b_inventory"})
-    b2b_inv["b2b_inventory"] = pd.to_numeric(b2b_inv["b2b_inventory"], errors="coerce").fillna(0)
+    # Convert to long form and extract latest
+    b2b_long = b2b.melt(id_vars=["sku_code"], value_vars=date_cols,
+                        var_name="date", value_name="inventory")
+    b2b_latest = b2b_long[b2b_long["date"] == latest_col][["sku_code", "inventory"]]
+    b2b_latest.rename(columns={"sku_code": "sku", "inventory": "b2b_inventory"}, inplace=True)
+    b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"],
+                                                errors="coerce").fillna(0)
 
-    report = report.merge(lookup, on="variant_id", how="left").merge(b2b_inv, on="sku", how="left")
+    # Merge
+    report = report.merge(lookup, on="variant_id", how="left").merge(b2b_latest, on="sku", how="left")
     report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
 
     report["variant_label"] = report.apply(
-        lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else x["variant_id"],
-        axis=1,
+        lambda x: f"{x['product_title']} ({x['variant_id']})"
+        if pd.notna(x["product_title"]) else x["variant_id"], axis=1
     )
 
     return report, tidy
