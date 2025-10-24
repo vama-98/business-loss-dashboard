@@ -104,24 +104,34 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp"]], on="variant_id", how="left")
 
     # -------------------------------
-    # B2B INVENTORY MERGE
+    # B2B INVENTORY MERGE (Robust)
     # -------------------------------
     lookup = pd.read_csv(LOOKUP_URL)
     lookup.columns = lookup.columns.str.strip().str.lower().str.replace(" ", "_")
-    b2b = pd.read_csv(B2B_INVENTORY_URL)
 
-    lookup.rename(columns={"product_variant_id": "variant_id", "product_variant_sku": "sku"}, inplace=True)
+    lookup.rename(columns={
+        "product_variant_id": "variant_id",
+        "product_variant_sku": "sku"
+    }, inplace=True)
     lookup["variant_id"] = lookup["variant_id"].astype(str)
+    lookup["sku"] = lookup["sku"].fillna("").astype(str).str.strip()
 
-    # Find latest numeric date column in B2B sheet
+    b2b = pd.read_csv(B2B_INVENTORY_URL)
+    b2b.columns = b2b.columns.str.strip().str.lower().str.replace(" ", "_")
+
+    # Detect SKU column (works for "sku_code" or "sku")
+    sku_col = [c for c in b2b.columns if "sku" in c][0]
+
+    # Find latest date column
     date_cols = [c for c in b2b.columns if any(ch.isdigit() for ch in c)]
     latest_col = date_cols[-1] if date_cols else None
 
-    # Map SKU → latest inventory value
-    b2b_inv = b2b[["sku code", latest_col]].rename(columns={"sku code": "sku", latest_col: "b2b_inventory"})
-    b2b_inv["b2b_inventory"] = pd.to_numeric(b2b_inv["b2b_inventory"], errors="coerce").fillna(0)
+    if latest_col:
+        b2b_inv = b2b[[sku_col, latest_col]].rename(columns={sku_col: "sku", latest_col: "b2b_inventory"})
+        b2b_inv["b2b_inventory"] = pd.to_numeric(b2b_inv["b2b_inventory"], errors="coerce").fillna(0)
+    else:
+        b2b_inv = pd.DataFrame(columns=["sku", "b2b_inventory"])
 
-    # Merge variant_id → sku → inventory
     report = report.merge(lookup, on="variant_id", how="left").merge(b2b_inv, on="sku", how="left")
     report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
 
