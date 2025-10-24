@@ -8,6 +8,8 @@ import math
 # -------------------------------
 INVENTORY_URL = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=0"
 ARR_DRR_URL   = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=1079657777"
+LOOKUP_URL    = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=635962983"
+B2B_INVENTORY_URL = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=2131638248"
 
 # -------------------------------
 # FUNCTIONS
@@ -101,6 +103,28 @@ def calculate_business_loss(inventory_url, arr_drr_url, start_date, end_date):
     arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp"]], on="variant_id", how="left")
 
+    # -------------------------------
+    # B2B INVENTORY MERGE
+    # -------------------------------
+    lookup = pd.read_csv(LOOKUP_URL)
+    lookup.columns = lookup.columns.str.strip().str.lower().str.replace(" ", "_")
+    b2b = pd.read_csv(B2B_INVENTORY_URL)
+
+    lookup.rename(columns={"product_variant_id": "variant_id", "product_variant_sku": "sku"}, inplace=True)
+    lookup["variant_id"] = lookup["variant_id"].astype(str)
+
+    # Find latest numeric date column in B2B sheet
+    date_cols = [c for c in b2b.columns if any(ch.isdigit() for ch in c)]
+    latest_col = date_cols[-1] if date_cols else None
+
+    # Map SKU → latest inventory value
+    b2b_inv = b2b[["sku code", latest_col]].rename(columns={"sku code": "sku", latest_col: "b2b_inventory"})
+    b2b_inv["b2b_inventory"] = pd.to_numeric(b2b_inv["b2b_inventory"], errors="coerce").fillna(0)
+
+    # Merge variant_id → sku → inventory
+    report = report.merge(lookup, on="variant_id", how="left").merge(b2b_inv, on="sku", how="left")
+    report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
+
     # Compute business loss and DOH (rounded up)
     report["drr"] = pd.to_numeric(report.get("drr", 0), errors="coerce").fillna(0)
     report["asp"] = pd.to_numeric(report.get("asp", 0), errors="coerce").fillna(0)
@@ -149,27 +173,25 @@ if st.button("🚀 Calculate Business Loss"):
 
         st.subheader("📋 Variant-wise Business Loss (Active SKUs Only)")
 
-        # -------------------------------
-        # Highlighting logic
-        # -------------------------------
         def highlight_doh(row):
             color = ""
             if row["latest_inventory"] == 0:
-                color = "background-color: #FFC7C7"      # red (OOS)
-            elif row["doh"] is not None and -1 <= row["doh"] <= 7:
-                color = "background-color: #FFC7C7"      # red
+                color = "background-color: #FFC7C7"  # red (OOS)
+            elif row["doh"] is not None and 1 <= row["doh"] <= 7:
+                color = "background-color: #FFA07A"  # orange
             elif row["doh"] is not None and 8 <= row["doh"] <= 15:
-                color = "background-color: #fff6a5"      # yellow
+                color = "background-color: #fff6a5"  # yellow
             return [color] * len(row)
 
         styled_df = (
             report[[
-                "variant_label", "latest_inventory",
+                "variant_label", "latest_inventory", "b2b_inventory",
                 "doh", "days_out_of_stock", "drr", "asp", "business_loss"
             ]]
             .style.apply(highlight_doh, axis=1)
             .format({
                 "latest_inventory": "{:.0f}",
+                "b2b_inventory": "{:.0f}",
                 "doh": "{:.0f}",
                 "drr": "{:.1f}",
                 "asp": "₹{:.0f}",
@@ -190,8 +212,3 @@ if st.button("🚀 Calculate Business Loss"):
                 color_discrete_sequence=px.colors.sequential.RdBu
             )
             st.plotly_chart(fig2, use_container_width=True)
-
-
-
-
-
