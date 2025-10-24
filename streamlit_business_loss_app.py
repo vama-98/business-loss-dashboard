@@ -205,7 +205,7 @@ if report is not None and not report.empty:
     # PIE CHART
     # -------------------------------
     st.subheader("📊 Contribution to Total Business Loss")
-    pie_df = report[report["business_loss"] > = 3]
+    pie_df = report[report["business_loss"] > 0]
     if not pie_df.empty:
         fig2 = px.pie(
             pie_df,
@@ -290,4 +290,5 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
