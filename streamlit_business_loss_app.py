@@ -206,7 +206,89 @@ if report is not None and not report.empty:
     # -------------------------------
     st.subheader("📊 Contribution to Total Business Loss")
     pie_df = report[report["business_loss"] > 3]
-    pie_df = report[report["business_loss"] > 0]
     if not pie_df.empty:
         fig2 = px.pie(
             pie_df,
+            names="variant_label",
+            values="business_loss",
+            title="Contribution to Total Business Loss (Active SKUs)",
+            color_discrete_sequence=px.colors.sequential.RdBu
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # -------------------------------
+    # 🥇 TOP & BOTTOM D2C PERFORMERS
+    # -------------------------------
+    st.markdown("---")
+    st.subheader("🏆 D2C Performance Insights")
+
+    col_left, col_right = st.columns(2)
+
+    drr_df = report[["variant_label", "drr", "latest_inventory", "doh"]].copy()
+    drr_df["drr"] = pd.to_numeric(drr_df["drr"], errors="coerce").fillna(0)
+
+    top5 = drr_df.sort_values("drr", ascending=False).head(5)
+    bottom5 = drr_df[drr_df["drr"] > 0].sort_values("drr", ascending=True).head(5)
+
+    with col_left:
+        st.markdown("### 🥇 Top 5 D2C Performers")
+        st.dataframe(
+            top5.style.format({
+                "drr": "{:.1f}",
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}"
+            }),
+            use_container_width=True
+        )
+
+    with col_right:
+        st.markdown("### 🪫 Bottom 5 D2C Performers")
+        st.dataframe(
+            bottom5.style.format({
+                "drr": "{:.1f}",
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}"
+            }),
+            use_container_width=True
+        )
+
+    # -------------------------------
+    # SIDEBAR SIMULATION
+    # -------------------------------
+    st.sidebar.markdown("## 🧱 Block Inventory (Simulation)")
+    selected_product = st.sidebar.selectbox(
+        "Select Product",
+        options=report["variant_label"].tolist()
+    )
+    qty_to_block = st.sidebar.number_input(
+        "Enter Quantity to Block",
+        min_value=0,
+        value=0,
+        step=1
+    )
+
+    if st.sidebar.button("Simulate Impact"):
+        row = report.loc[report["variant_label"] == selected_product].iloc[0]
+        latest_inv = row["latest_inventory"]
+        drr = row["drr"]
+
+        if drr <= 0:
+            st.sidebar.error("❌ Invalid DRR — cannot simulate impact.")
+        else:
+            new_doh = math.ceil((latest_inv - qty_to_block) / drr)
+            if new_doh < 15:
+                st.sidebar.warning(
+                    f"⚠️ Blocking this inventory will result in low inventory levels for D2C.\n\n"
+                    f"Current DOH after block: **{new_doh} days**"
+                )
+            else:
+                st.sidebar.success(
+                    f"✅ Blocking inventory may not result in business loss.\n\n"
+                    f"Current DOH after block: **{new_doh} days**\n\n"
+                    f"You can connect with the SCM team to block."
+                )
+
+else:
+    st.info("Please calculate business loss first using the 🚀 button.")
+
+
