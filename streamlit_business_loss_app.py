@@ -81,36 +81,11 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
     report = pd.merge(oos_days, latest_inv, on="variant_id", how="left")
 
-    # 🟢 ARR_DRR LOAD & NORMALIZE
     arr_drr = pd.read_csv(arr_drr_url)
+    arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
+    arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
 
-    arr_drr.columns = (
-        arr_drr.columns
-        .str.strip()
-        .str.lower()
-        .str.replace(" ", "_")
-        .str.replace("₹", "", regex=False)
-        .str.replace("(", "", regex=False)
-        .str.replace(")", "", regex=False)
-    )
-
-    arr_drr.rename(columns={
-        "sku_code": "sku_code",
-        "product_name": "product_title",
-        "product": "product_title",
-        "asp_inr": "asp",
-        "asp_₹": "asp",
-        "asp_rs": "asp",
-        "avg_selling_price": "asp",
-        "daily_run_rate": "drr",
-        "drr_units_day": "drr"
-    }, inplace=True)
-
-    # Normalize SKU codes
-    if "sku_code" in arr_drr.columns:
-        arr_drr["sku_code"] = arr_drr["sku_code"].astype(str).str.strip().str.upper().str.replace("-", "", regex=False)
-
-    required_cols = {"variant_id", "product_title", "drr", "asp", "sku_code"}
+    required_cols = {"variant_id", "product_title", "drr", "asp", "sku"}
     missing = required_cols - set(arr_drr.columns)
     if missing:
         raise ValueError(f"❌ Missing columns in ARR/DRR sheet: {missing}")
@@ -118,10 +93,10 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
     report["variant_id"] = report["variant_id"].astype(str)
 
-    report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku_code"]],
+    report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
                       on="variant_id", how="left")
 
-    # 🟢 B2B INVENTORY LOAD
+    # 🟢 Read B2B inventory (SKU columns, date rows)
     b2b_raw = pd.read_csv(b2b_url, header=0)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
 
@@ -132,44 +107,15 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
 
     b2b_latest = latest_row.drop(labels=["parsed_date"]).reset_index()
-    b2b_latest.columns = ["sku_code", "b2b_inventory"]
-
-    b2b_latest["sku_code"] = (
-        b2b_latest["sku_code"].astype(str)
-        .str.strip()
-        .str.upper()
-        .str.replace("-", "", regex=False)
-    )
+    b2b_latest.columns = ["sku", "b2b_inventory"]
+    b2b_latest["sku"] = b2b_latest["sku"].astype(str).str.strip().str.upper()
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
-    report["sku_code"] = (
-        report["sku_code"].astype(str)
-        .str.strip()
-        .str.upper()
-        .str.replace("-", "", regex=False)
-    )
-
-    # 🧩 Debug Output
-    with st.expander("🧩 Debug Info: SKU Matching Details"):
-        st.write("🧾 ARR_DRR sample SKUs:", report["sku_code"].head(10).tolist())
-        st.write("📦 B2B sample SKUs:", b2b_latest["sku_code"].head(10).tolist())
-
-        common_skus = set(report["sku_code"]).intersection(set(b2b_latest["sku_code"]))
-        st.write(f"✅ Common SKUs matched: {len(common_skus)}")
-        if len(common_skus) > 0:
-            st.write("🔹 Example matched SKUs:", list(common_skus)[:10])
-
-    # Merge with B2B
-    report = pd.merge(report, b2b_latest, on="sku_code", how="left")
+    report["sku"] = report["sku"].astype(str).str.strip().str.upper()
+    report = pd.merge(report, b2b_latest, on="sku", how="left")
     report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
 
-    # 🧠 Debug check for a known SKU
-    example_sku = "PGSGCSERUM1"
-    if example_sku in list(report["sku_code"]):
-        val = report.loc[report["sku_code"] == example_sku, "b2b_inventory"].values
-        st.write(f"🧠 Debug: B2B Inventory for {example_sku} = {val}")
-
-    # Compute metrics
+    # Compute business loss & DOH
     report["drr"] = pd.to_numeric(report["drr"], errors="coerce").fillna(0)
     report["asp"] = pd.to_numeric(report["asp"], errors="coerce").fillna(0)
     report["latest_inventory"] = pd.to_numeric(report["latest_inventory"], errors="coerce").fillna(0)
@@ -201,6 +147,9 @@ with col1:
 with col2:
     end_date = st.date_input("End Date")
 
+# -------------------------------
+# STATEFUL REPORT HANDLING
+# -------------------------------
 if "report" not in st.session_state:
     st.session_state["report"] = None
 
@@ -212,6 +161,9 @@ if st.button("🚀 Calculate Business Loss"):
 report = st.session_state["report"]
 
 if report is not None and not report.empty:
+    # -------------------------------
+    # MAIN METRICS
+    # -------------------------------
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Unique Variants", report["variant_id"].nunique())
     c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
@@ -224,19 +176,123 @@ if report is not None and not report.empty:
     def highlight_doh(row):
         color = ""
         if row["latest_inventory"] == 0:
-            color = "background-color: #FFC7C7"
+            color = "background-color: #FFC7C7"  # red
         elif row["doh"] is not None and row["doh"] <= 7:
-            color = "background-color: #FFC7C7"
+            color = "background-color: #FFC7C7"  # red
         elif row["doh"] is not None and 8 <= row["doh"] <= 15:
-            color = "background-color: #fff6a5"
+            color = "background-color: #fff6a5"  # yellow
         return [color] * len(row)
 
-    st.dataframe(
+    styled_df = (
         report[[
             "variant_label", "latest_inventory", "b2b_inventory",
             "doh", "days_out_of_stock", "drr", "asp", "business_loss"
-        ]],
-        use_container_width=True
+        ]]
+        .style.apply(highlight_doh, axis=1)
+        .format({
+            "latest_inventory": "{:.0f}",
+            "b2b_inventory": "{:.0f}",
+            "doh": "{:.0f}",
+            "drr": "{:.1f}",
+            "asp": "₹{:.0f}",
+            "business_loss": "₹{:.0f}"
+        })
     )
+
+    st.dataframe(styled_df, use_container_width=True)
+
+    # -------------------------------
+    # PIE CHART
+    # -------------------------------
+    st.subheader("📊 Contribution to Total Business Loss")
+    total_loss = report["business_loss"].sum()
+    pie_df = report[report["business_loss"] > 0.03 * total_loss]
+    #pie_df = report[report["business_loss"] > 0]
+    if not pie_df.empty:
+        fig2 = px.pie(
+            pie_df,
+            names="variant_label",
+            values="business_loss",
+            title="Contribution to Total Business Loss (Active SKUs)",
+            color_discrete_sequence=px.colors.sequential.RdBu
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # -------------------------------
+    # 🥇 TOP & BOTTOM D2C PERFORMERS
+    # -------------------------------
+    st.markdown("---")
+    st.subheader("🏆 D2C Performance Insights")
+
+    col_left, col_right = st.columns(2)
+
+    drr_df = report[["variant_label", "drr", "latest_inventory", "doh"]].copy()
+    drr_df["drr"] = pd.to_numeric(drr_df["drr"], errors="coerce").fillna(0)
+
+    top5 = drr_df.sort_values("drr", ascending=False).head(5)
+    bottom5 = drr_df[drr_df["drr"] > 0].sort_values("drr", ascending=True).head(5)
+
+    with col_left:
+        st.markdown("### 🥇 Top 5 D2C Performers")
+        st.dataframe(
+            top5.style.format({
+                "drr": "{:.1f}",
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}"
+            }),
+            use_container_width=True
+        )
+
+    with col_right:
+        st.markdown("### 🪫 Bottom 5 D2C Performers")
+        st.dataframe(
+            bottom5.style.format({
+                "drr": "{:.1f}",
+                "latest_inventory": "{:.0f}",
+                "doh": "{:.0f}"
+            }),
+            use_container_width=True
+        )
+
+    # -------------------------------
+    # SIDEBAR SIMULATION
+    # -------------------------------
+    st.sidebar.markdown("## 🧱 Block Inventory (Simulation)")
+    selected_product = st.sidebar.selectbox(
+        "Select Product",
+        options=report["variant_label"].tolist()
+    )
+    qty_to_block = st.sidebar.number_input(
+        "Enter Quantity to Block",
+        min_value=0,
+        value=0,
+        step=1
+    )
+
+    if st.sidebar.button("Simulate Impact"):
+        row = report.loc[report["variant_label"] == selected_product].iloc[0]
+        latest_inv = row["latest_inventory"]
+        drr = row["drr"]
+
+        if drr <= 0:
+            st.sidebar.error("❌ Invalid DRR — cannot simulate impact.")
+        else:
+            new_doh = math.ceil((latest_inv - qty_to_block) / drr)
+            if new_doh < 15:
+                st.sidebar.warning(
+                    f"⚠️ Blocking this inventory will result in low inventory levels for D2C.\n\n"
+                    f"Current DOH after block: **{new_doh} days**"
+                )
+            else:
+                st.sidebar.success(
+                    f"✅ Blocking inventory may not result in business loss.\n\n"
+                    f"Current DOH after block: **{new_doh} days**\n\n"
+                    f"You can connect with the SCM team to block."
+                )
+
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
+
+
+
