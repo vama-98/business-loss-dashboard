@@ -117,7 +117,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
             st.json(b2b_latest["sku"].head(10).tolist())
             st.markdown("**Sample rows:**")
             st.dataframe(report.head(10))
-
+            report["days_out_of_stock"] = report["days_out_of_stock"].fillna(0).round().astype(int)
     return report.fillna(0)
 
 
@@ -219,3 +219,4 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
