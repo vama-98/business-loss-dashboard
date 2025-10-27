@@ -7,7 +7,7 @@ import math
 # CONFIG
 # -------------------------------
 INVENTORY_URL = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=0"
-ARR_DRR_URL   = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/edit?gid=1076162133#gid=1076162133"
+ARR_DRR_URL   = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/edit?gid=1079657777#gid=1079657777"
 B2B_URL       = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W8t4lRYJnyMOwMX8sNkfU/export?format=csv&gid=2131638248"
 
 # -------------------------------
@@ -219,5 +219,6 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
 
