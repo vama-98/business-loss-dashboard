@@ -81,6 +81,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
     report = pd.merge(oos_days, latest_inv, on="variant_id", how="left")
 
+    # ---- ARR/DRR merge (fixed variant_id alignment)
     arr_drr = pd.read_csv(arr_drr_url)
     arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
     arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
@@ -90,19 +91,23 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     if missing:
         raise ValueError(f"❌ Missing columns in ARR/DRR sheet: {missing}")
 
-    arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
-    report["variant_id"] = report["variant_id"].astype(str)
+    # ✅ Ensure both IDs are clean strings
+    arr_drr["variant_id"] = arr_drr["variant_id"].astype(str).str.strip()
+    report["variant_id"] = report["variant_id"].astype(str).str.strip()
 
+    # Perform merge
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
                       on="variant_id", how="left")
 
-    # 🟢 Read B2B inventory (SKU columns, date rows)
+    # Debug print — optional
+    st.write("✅ Matched products:", report["product_title"].notna().sum())
+
+    # ---- B2B inventory
     b2b_raw = pd.read_csv(b2b_url, header=0)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
 
     date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[date_mask].copy()
-
     b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
     latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
 
@@ -115,16 +120,13 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     report = pd.merge(report, b2b_latest, on="sku", how="left")
     report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
 
-    # Compute business loss & DOH
-    report["drr"] = pd.to_numeric(report["drr"], errors="coerce").fillna(0)
-    report["asp"] = pd.to_numeric(report["asp"], errors="coerce").fillna(0)
-    report["latest_inventory"] = pd.to_numeric(report["latest_inventory"], errors="coerce").fillna(0)
+    # ---- Computations
+    report["drr"] = pd.to_numeric(report.get("drr", 0), errors="coerce").fillna(0)
+    report["asp"] = pd.to_numeric(report.get("asp", 0), errors="coerce").fillna(0)
+    report["latest_inventory"] = pd.to_numeric(report.get("latest_inventory", 0), errors="coerce").fillna(0)
 
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
-    report["doh"] = report.apply(
-        lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else None,
-        axis=1
-    )
+    report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else 0, axis=1)
 
     report["variant_label"] = report.apply(
         lambda x: f"{x['product_title']} ({x['variant_id']})"
@@ -147,9 +149,6 @@ with col1:
 with col2:
     end_date = st.date_input("End Date")
 
-# -------------------------------
-# STATEFUL REPORT HANDLING
-# -------------------------------
 if "report" not in st.session_state:
     st.session_state["report"] = None
 
@@ -161,9 +160,6 @@ if st.button("🚀 Calculate Business Loss"):
 report = st.session_state["report"]
 
 if report is not None and not report.empty:
-    # -------------------------------
-    # MAIN METRICS
-    # -------------------------------
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Unique Variants", report["variant_id"].nunique())
     c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
@@ -176,19 +172,24 @@ if report is not None and not report.empty:
     def highlight_doh(row):
         color = ""
         if row["latest_inventory"] == 0:
-            color = "background-color: #FFC7C7"  # red
-        elif row["doh"] is not None and row["doh"] <= 7:
-            color = "background-color: #FFC7C7"  # red
-        elif row["doh"] is not None and 8 <= row["doh"] <= 15:
-            color = "background-color: #fff6a5"  # yellow
+            color = "background-color: #FFC7C7"
+        elif 0 < row["doh"] <= 7:
+            color = "background-color: #FFC7C7"
+        elif 8 <= row["doh"] <= 15:
+            color = "background-color: #fff6a5"
         return [color] * len(row)
 
+    display_df = report[[
+        "variant_label", "latest_inventory", "b2b_inventory",
+        "doh", "days_out_of_stock", "drr", "asp", "business_loss"
+    ]].copy()
+
+    # Ensure numeric consistency
+    for c in ["latest_inventory", "b2b_inventory", "doh", "drr", "asp", "business_loss"]:
+        display_df[c] = pd.to_numeric(display_df[c], errors="coerce").fillna(0)
+
     styled_df = (
-        report[[
-            "variant_label", "latest_inventory", "b2b_inventory",
-            "doh", "days_out_of_stock", "drr", "asp", "business_loss"
-        ]]
-        .style.apply(highlight_doh, axis=1)
+        display_df.style.apply(highlight_doh, axis=1)
         .format({
             "latest_inventory": "{:.0f}",
             "b2b_inventory": "{:.0f}",
@@ -198,16 +199,12 @@ if report is not None and not report.empty:
             "business_loss": "₹{:.0f}"
         })
     )
-
     st.dataframe(styled_df, use_container_width=True)
 
-    # -------------------------------
-    # PIE CHART
-    # -------------------------------
-    st.subheader("📊 Contribution to Total Business Loss")
+    # ---- PIE CHART
+    st.subheader("📊 Contribution to Total Business Loss (>3%)")
     total_loss = report["business_loss"].sum()
     pie_df = report[report["business_loss"] > 0.03 * total_loss]
-    #pie_df = report[report["business_loss"] > 0]
     if not pie_df.empty:
         fig2 = px.pie(
             pie_df,
@@ -218,81 +215,34 @@ if report is not None and not report.empty:
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-    # -------------------------------
-    # 🥇 TOP & BOTTOM D2C PERFORMERS
-    # -------------------------------
+    # ---- TOP & BOTTOM
     st.markdown("---")
     st.subheader("🏆 D2C Performance Insights")
-
-    col_left, col_right = st.columns(2)
-
-    drr_df = report[["variant_label", "drr", "latest_inventory", "doh"]].copy()
-    drr_df["drr"] = pd.to_numeric(drr_df["drr"], errors="coerce").fillna(0)
-
-    top5 = drr_df.sort_values("drr", ascending=False).head(5)
-    bottom5 = drr_df[drr_df["drr"] > 0].sort_values("drr", ascending=True).head(5)
-
-    with col_left:
+    top5 = report.nlargest(5, "drr")[["variant_label", "drr", "latest_inventory", "doh"]]
+    bottom5 = report[report["drr"] > 0].nsmallest(5, "drr")[["variant_label", "drr", "latest_inventory", "doh"]]
+    c1, c2 = st.columns(2)
+    with c1:
         st.markdown("### 🥇 Top 5 D2C Performers")
-        st.dataframe(
-            top5.style.format({
-                "drr": "{:.1f}",
-                "latest_inventory": "{:.0f}",
-                "doh": "{:.0f}"
-            }),
-            use_container_width=True
-        )
-
-    with col_right:
+        st.dataframe(top5, use_container_width=True)
+    with c2:
         st.markdown("### 🪫 Bottom 5 D2C Performers")
-        st.dataframe(
-            bottom5.style.format({
-                "drr": "{:.1f}",
-                "latest_inventory": "{:.0f}",
-                "doh": "{:.0f}"
-            }),
-            use_container_width=True
-        )
+        st.dataframe(bottom5, use_container_width=True)
 
-    # -------------------------------
-    # SIDEBAR SIMULATION
-    # -------------------------------
+    # ---- SIMULATION
     st.sidebar.markdown("## 🧱 Block Inventory (Simulation)")
-    selected_product = st.sidebar.selectbox(
-        "Select Product",
-        options=report["variant_label"].tolist()
-    )
-    qty_to_block = st.sidebar.number_input(
-        "Enter Quantity to Block",
-        min_value=0,
-        value=0,
-        step=1
-    )
-
+    selected_product = st.sidebar.selectbox("Select Product", options=report["variant_label"].tolist())
+    qty_to_block = st.sidebar.number_input("Enter Quantity to Block", min_value=0, value=0, step=1)
     if st.sidebar.button("Simulate Impact"):
         row = report.loc[report["variant_label"] == selected_product].iloc[0]
-        latest_inv = row["latest_inventory"]
-        drr = row["drr"]
-
+        latest_inv, drr = row["latest_inventory"], row["drr"]
         if drr <= 0:
             st.sidebar.error("❌ Invalid DRR — cannot simulate impact.")
         else:
             new_doh = math.ceil((latest_inv - qty_to_block) / drr)
             if new_doh < 15:
-                st.sidebar.warning(
-                    f"⚠️ Blocking this inventory will result in low inventory levels for D2C.\n\n"
-                    f"Current DOH after block: **{new_doh} days**"
-                )
+                st.sidebar.warning(f"⚠️ Blocking this inventory will result in low inventory levels for D2C.\n\nCurrent DOH after block: **{new_doh} days**")
             else:
-                st.sidebar.success(
-                    f"✅ Blocking inventory may not result in business loss.\n\n"
-                    f"Current DOH after block: **{new_doh} days**\n\n"
-                    f"You can connect with the SCM team to block."
-                )
+                st.sidebar.success(f"✅ Blocking inventory may not result in business loss.\n\nCurrent DOH after block: **{new_doh} days**\n\nYou can connect with the SCM team to block.")
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
-
-
-
-
