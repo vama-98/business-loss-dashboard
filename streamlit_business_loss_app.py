@@ -56,6 +56,13 @@ def reshape_inventory(sheet_url, start_date=None, end_date=None):
     return tidy
 
 
+def clean_variant_id(v):
+    """Normalize variant IDs by stripping .0, .00, spaces, etc."""
+    v = str(v).strip()
+    v = v.replace(".0", "").replace(".00", "")
+    return v
+
+
 def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end_date):
     tidy = reshape_inventory(inventory_url, start_date, end_date)
     if tidy.empty:
@@ -83,7 +90,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     report = pd.merge(oos_days, latest_inv, on="variant_id", how="left")
 
     # -------------------------------
-    # ARR_DRR Debug Section
+    # ARR_DRR Debug + Merge
     # -------------------------------
     st.markdown("### 🧾 ARR_DRR Debug Info")
     arr_drr = pd.read_csv(arr_drr_url)
@@ -91,22 +98,17 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
 
     st.write("**ARR_DRR Columns:**", list(arr_drr.columns))
-    st.write("**Sample Rows (ARR_DRR):**")
     st.dataframe(arr_drr.head())
 
-    # Clean & Normalize
-    arr_drr["variant_id"] = arr_drr["variant_id"].astype(str).str.strip()
-    report["variant_id"] = report["variant_id"].astype(str).str.strip()
+    arr_drr["variant_id"] = arr_drr["variant_id"].apply(clean_variant_id)
+    report["variant_id"] = report["variant_id"].apply(clean_variant_id)
 
-    sample_inventory_ids = report["variant_id"].head(10).tolist()
-    sample_arrdrr_ids = arr_drr["variant_id"].head(10).tolist()
+    st.write("🧩 Sample variant_ids (Inventory):", report["variant_id"].head(10).tolist())
+    st.write("🧩 Sample variant_ids (ARR_DRR):", arr_drr["variant_id"].head(10).tolist())
+
     common_ids = set(report["variant_id"]).intersection(set(arr_drr["variant_id"]))
+    st.success(f"✅ Common variant_id count after cleaning: {len(common_ids)}")
 
-    st.write("🧩 Sample variant_ids (Inventory):", sample_inventory_ids)
-    st.write("🧩 Sample variant_ids (ARR_DRR):", sample_arrdrr_ids)
-    st.write(f"✅ Common variant_id count: {len(common_ids)}")
-
-    # Merge ARR_DRR
     report = pd.merge(
         report,
         arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
@@ -115,20 +117,19 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     )
 
     # -------------------------------
-    # B2B Debug Section
+    # B2B Debug + Merge
     # -------------------------------
     st.markdown("### 📦 B2B Debug Info")
     b2b_raw = pd.read_csv(b2b_url, header=0)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
-
     st.write("**B2B Columns:**", list(b2b_raw.columns))
-    st.write("**Sample B2B Data:**")
     st.dataframe(b2b_raw.head())
 
     date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[date_mask].copy()
     b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
     latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
+
     b2b_latest = latest_row.drop(labels=["parsed_date"]).reset_index()
     b2b_latest.columns = ["sku", "b2b_inventory"]
     b2b_latest["sku"] = b2b_latest["sku"].astype(str).str.strip().str.upper()
@@ -136,9 +137,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
     report["sku"] = report["sku"].astype(str).str.strip().str.upper()
     common_skus = set(report["sku"]).intersection(set(b2b_latest["sku"]))
-    st.write(f"✅ Common SKUs matched: {len(common_skus)}")
-    st.write("🧾 Sample SKUs from ARR_DRR:", arr_drr["sku"].dropna().head(10).tolist())
-    st.write("📦 Sample SKUs from B2B:", b2b_latest["sku"].head(10).tolist())
+    st.info(f"🔍 Common SKUs matched between ARR_DRR & B2B: {len(common_skus)}")
 
     report = pd.merge(report, b2b_latest, on="sku", how="left")
     report["b2b_inventory"] = report["b2b_inventory"].fillna(0)
@@ -155,7 +154,8 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     )
 
     report["variant_label"] = report.apply(
-        lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else str(x["variant_id"]),
+        lambda x: f"{x['product_title']} ({x['variant_id']})"
+        if pd.notna(x["product_title"]) else str(x["variant_id"]),
         axis=1
     )
 
@@ -166,10 +166,10 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
 
 # -------------------------------
-# STREAMLIT APP
+# STREAMLIT DASHBOARD
 # -------------------------------
-st.set_page_config(page_title="Business Loss Dashboard (Full Debug)", layout="wide")
-st.title("💸 Business Loss Dashboard (Debug Mode)")
+st.set_page_config(page_title="Business Loss Dashboard (Fixed Variant IDs)", layout="wide")
+st.title("💸 Business Loss Dashboard (Cleaned Variant IDs)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -177,8 +177,8 @@ with col1:
 with col2:
     end_date = st.date_input("End Date")
 
-if st.button("🚀 Calculate Business Loss (Debug)"):
-    with st.spinner("Running full debug... please wait ⏳"):
+if st.button("🚀 Calculate Business Loss"):
+    with st.spinner("Crunching numbers with cleaned variant IDs... ⏳"):
         report, tidy = calculate_business_loss(INVENTORY_URL, ARR_DRR_URL, B2B_URL, start_date, end_date)
     st.session_state["report"] = report
 
@@ -186,7 +186,7 @@ report = st.session_state.get("report", None)
 
 if report is not None and not report.empty:
     st.markdown("---")
-    st.subheader("📊 Final Summary Metrics")
+    st.subheader("📊 Business Loss Summary Metrics")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Unique Variants", report["variant_id"].nunique())
@@ -194,7 +194,7 @@ if report is not None and not report.empty:
     c3.metric("Avg DRR", round(report["drr"].mean(), 1))
     c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
 
-    st.markdown("### 🧩 Sample of Final Report")
+    st.markdown("### 🧾 Final Data Preview")
     st.dataframe(report.head(20))
 else:
-    st.info("Please click 🚀 to run the debug pipeline.")
+    st.info("Please click 🚀 to calculate business loss.")
