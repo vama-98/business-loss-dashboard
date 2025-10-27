@@ -81,73 +81,86 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
     report = pd.merge(oos_days, latest_inv, on="variant_id", how="left")
 
-    # ---- ARR/DRR merge (debug heavy)
+    # 🟢 ARR_DRR LOAD
     arr_drr = pd.read_csv(arr_drr_url)
-    arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
+    arr_drr.columns = arr_drr.columns.str.strip()
+    arr_drr["SKU Code"] = arr_drr["SKU Code"].astype(str).str.strip().str.upper().str.replace("-", "", regex=False)
 
-    st.write("🧾 ARR_DRR Columns:", arr_drr.columns.tolist())
-    st.write("🧾 First few rows of ARR_DRR:", arr_drr.head())
+    required_cols = {"variant_id", "product_title", "drr", "asp", "SKU Code"}
+    missing = required_cols - set(arr_drr.columns)
+    if missing:
+        raise ValueError(f"❌ Missing columns in ARR/DRR sheet: {missing}")
 
-    # Try to detect variant_id column automatically if not found
-    variant_col_candidates = [c for c in arr_drr.columns if "variant" in c and "id" in c]
-    if "variant_id" not in arr_drr.columns and variant_col_candidates:
-        arr_drr["variant_id"] = arr_drr[variant_col_candidates[0]]
-        st.write(f"✅ Using detected column as variant_id: {variant_col_candidates[0]}")
-    elif "variant_id" not in arr_drr.columns:
-        st.error("❌ No column resembling 'variant_id' found in ARR_DRR sheet!")
-        return pd.DataFrame(), tidy
+    arr_drr["variant_id"] = arr_drr["variant_id"].astype(str)
+    report["variant_id"] = report["variant_id"].astype(str)
 
-    # Clean variant_id values
-    arr_drr["variant_id"] = (
-        arr_drr["variant_id"]
-        .astype(str)
-        .str.strip()
-        .str.replace(r"\.0+$", "", regex=True)
-        .str.replace(r"\.0$", "", regex=True)
-    )
+    report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "SKU Code"]],
+                      on="variant_id", how="left")
 
-    # Show sample variant IDs
-    st.write("🔢 Sample variant_ids from ARR_DRR:", arr_drr["variant_id"].head(10).tolist())
-
-    report["variant_id"] = report["variant_id"].astype(str).str.strip()
-    st.write("📦 Sample variant_ids from Inventory:", report["variant_id"].head(10).tolist())
-
-    # Perform merge
-    report = pd.merge(
-        report,
-        arr_drr[["variant_id", "product_title", "drr", "asp", "sku_code"]] if "sku_code" in arr_drr.columns else arr_drr[["variant_id", "product_title", "drr", "asp"]],
-        on="variant_id",
-        how="left"
-    )
-
-    st.write("✅ Matched products after merge:", report["product_title"].notna().sum())
-
-    # ---- B2B inventory
+    # 🟢 B2B INVENTORY LOAD
     b2b_raw = pd.read_csv(b2b_url, header=0)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
+
     date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[date_mask].copy()
+
     b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
     latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
+
     b2b_latest = latest_row.drop(labels=["parsed_date"]).reset_index()
-    b2b_latest.columns = ["sku", "b2b_inventory"]
-    b2b_latest["sku"] = b2b_latest["sku"].astype(str).str.strip().str.upper()
-    b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
-    report["b2b_inventory"] = 0  # placeholder if no sku mapping
+    b2b_latest.columns = ["SKU Code", "B2B Inventory"]
 
-    # ---- Compute business loss
-    report["drr"] = pd.to_numeric(report.get("drr", 0), errors="coerce").fillna(0)
-    report["asp"] = pd.to_numeric(report.get("asp", 0), errors="coerce").fillna(0)
-    report["latest_inventory"] = pd.to_numeric(report.get("latest_inventory", 0), errors="coerce").fillna(0)
+    # Normalize SKUs
+    b2b_latest["SKU Code"] = (
+        b2b_latest["SKU Code"].astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace("-", "", regex=False)
+    )
+    b2b_latest["B2B Inventory"] = pd.to_numeric(b2b_latest["B2B Inventory"], errors="coerce").fillna(0)
+
+    report["SKU Code"] = (
+        report["SKU Code"].astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace("-", "", regex=False)
+    )
+
+    # 🧩 Debug
+    st.write("🧾 ARR_DRR sample SKUs:", report["SKU Code"].head(10).tolist())
+    st.write("📦 B2B sample SKUs:", b2b_latest["SKU Code"].head(10).tolist())
+
+    common_skus = set(report["SKU Code"]).intersection(set(b2b_latest["SKU Code"]))
+    st.write(f"✅ Common SKUs matched: {len(common_skus)}")
+    if len(common_skus) > 0:
+        st.write("🔹 Example matched SKUs:", list(common_skus)[:10])
+
+    # Merge with B2B
+    report = pd.merge(report, b2b_latest, on="SKU Code", how="left")
+    report["B2B Inventory"] = report["B2B Inventory"].fillna(0)
+
+    # 🧾 Debug check for a known SKU
+    example_sku = "PGSGCSERUM1"
+    if example_sku in list(report["SKU Code"]):
+        val = report.loc[report["SKU Code"] == example_sku, "B2B Inventory"].values
+        st.write(f"🧠 Debug: B2B Inventory for {example_sku} = {val}")
+
+    # Compute metrics
+    report["drr"] = pd.to_numeric(report["drr"], errors="coerce").fillna(0)
+    report["asp"] = pd.to_numeric(report["asp"], errors="coerce").fillna(0)
+    report["latest_inventory"] = pd.to_numeric(report["latest_inventory"], errors="coerce").fillna(0)
+
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
-    report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else 0, axis=1)
-
-    report["variant_label"] = report.apply(
-        lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else x["variant_id"],
+    report["doh"] = report.apply(
+        lambda x: math.ceil(x["latest_inventory"] / x["drr"]) if x["drr"] > 0 else None,
         axis=1
     )
 
-    st.write("📊 Final merged sample:", report.head(10))
+    report["variant_label"] = report.apply(
+        lambda x: f"{x['product_title']} ({x['variant_id']})"
+        if pd.notna(x["product_title"]) else x["variant_id"],
+        axis=1
+    )
 
     return report, tidy
 
@@ -156,7 +169,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 # STREAMLIT DASHBOARD
 # -------------------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
-st.title("💸 Business Loss Dashboard (Debug Mode)")
+st.title("💸 Business Loss Dashboard")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -167,7 +180,7 @@ with col2:
 if "report" not in st.session_state:
     st.session_state["report"] = None
 
-if st.button("🚀 Calculate Business Loss (Debug)"):
+if st.button("🚀 Calculate Business Loss"):
     with st.spinner("Crunching numbers... please wait ⏳"):
         report, tidy = calculate_business_loss(INVENTORY_URL, ARR_DRR_URL, B2B_URL, start_date, end_date)
     st.session_state["report"] = report
@@ -175,6 +188,31 @@ if st.button("🚀 Calculate Business Loss (Debug)"):
 report = st.session_state["report"]
 
 if report is not None and not report.empty:
-    st.write("✅ Report generated successfully. Rows:", len(report))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Unique Variants", report["variant_id"].nunique())
+    c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
+    c3.metric("Avg DRR", round(report["drr"].mean(), 1))
+    c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
+
+    st.markdown("---")
+    st.subheader("📋 Variant-wise Business Loss (Active SKUs Only)")
+
+    def highlight_doh(row):
+        color = ""
+        if row["latest_inventory"] == 0:
+            color = "background-color: #FFC7C7"
+        elif row["doh"] is not None and row["doh"] <= 7:
+            color = "background-color: #FFC7C7"
+        elif row["doh"] is not None and 8 <= row["doh"] <= 15:
+            color = "background-color: #fff6a5"
+        return [color] * len(row)
+
+    st.dataframe(
+        report[[
+            "variant_label", "latest_inventory", "B2B Inventory",
+            "doh", "days_out_of_stock", "drr", "asp", "business_loss"
+        ]],
+        use_container_width=True
+    )
 else:
-    st.warning("⚠️ No data returned. Check debug messages above.")
+    st.info("Please calculate business loss first using the 🚀 button.")
