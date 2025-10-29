@@ -53,17 +53,17 @@ def fetch_warehouse_summary(sku: str):
 # 📈 FETCH INVENTORY TREND
 # ------------------------------------------------
 @st.cache_data(ttl=3600)
-def fetch_inventory_trend(sku: str):
+def fetch_inventory_trend(sku):
     query = f"""
-        SELECT
-          DATE(TIMESTAMP_TRUNC(_PARTITIONTIME, DAY)) AS Date,
-          SUM(SAFE_CAST(Quantity AS FLOAT64)) AS Total_Inventory
+        SELECT *
         FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
         WHERE Sku = '{sku}'
-        GROUP BY Date
-        ORDER BY Date
+        LIMIT 5
     """
-    return client.query(query).to_dataframe()
+    st.write("🧠 Debug query:", query)
+    df = client.query(query).to_dataframe()
+    st.write("📋 Sample data:", df.head())
+    return df
 
 # ------------------------------------------------
 # 🧾 RESHAPE INVENTORY FUNCTION
@@ -281,3 +281,4 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
