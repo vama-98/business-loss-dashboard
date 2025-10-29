@@ -1,10 +1,10 @@
-streamlit>=1.36
-pandas>=2.2
+streamlit>=1.37.0
+pandas>=2.2.2
 plotly>=5.20.0
-google-genai>=0.3
-openpyxl>=3.1
-xlsxwriter>=3.2
-requests>=2.31
-google-cloud-bigquery>=3.20.0
-
+google-cloud-bigquery>=3.25.0
+db-dtypes>=1.2.0
+google-auth>=2.30.0
+openpyxl>=3.1.2
+xlsxwriter>=3.2.0
+requests>=2.31.0
 
