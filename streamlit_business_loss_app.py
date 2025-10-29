@@ -19,14 +19,12 @@ B2B_URL       = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W
 def get_bq_client():
     creds_dict = st.secrets["bigquery"]
     credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    client = bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
-    return client
+    return bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
 
 client = get_bq_client()
 
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
-    """Fetch warehouse-wise inventory from BigQuery for a given SKU"""
     query = f"""
         SELECT 
           Company_Name,
@@ -41,19 +39,17 @@ def fetch_warehouse_summary(sku):
     df = client.query(query).to_dataframe()
     if not df.empty:
         df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # Example placeholder
+        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # example metric
     return df.fillna(0)
 
 # -------------------------------
 # HELPERS
 # -------------------------------
 def clean_id(v):
-    v = str(v).strip().replace(".0", "").replace(".00", "")
-    return v
+    return str(v).strip().replace(".0", "").replace(".00", "")
 
 def clean_sku(s):
-    s = str(s).strip().replace(".0", "").replace(".00", "").upper()
-    return s
+    return str(s).strip().replace(".0", "").replace(".00", "").upper()
 
 def reshape_inventory(sheet_url, start_date=None, end_date=None):
     df = pd.read_csv(sheet_url, header=[0, 1])
@@ -138,7 +134,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 # STREAMLIT DASHBOARD
 # -------------------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
-st.title("💸 Business Loss Dashboard (with BigQuery Drilldown)")
+st.title("💸 Business Loss Dashboard (with Live Warehouse Drilldown)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -166,7 +162,6 @@ if report is not None and not report.empty:
     c3.metric("Avg DRR", round(report["drr"].mean(), 1))
     c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
 
-    # Highlight DOH
     def highlight_doh(row):
         if row["latest_inventory"] == 0 or row["doh"] <= 7:
             color = "background-color: #FFC7C7"
@@ -186,30 +181,35 @@ if report is not None and not report.empty:
     )
     st.dataframe(styled_df, use_container_width=True)
 
-    # --- NEW SECTION: EXPANDABLE SKU DRILLDOWN ---
+    # --- Click to view SKU-level drilldown ---
     st.markdown("---")
-    st.subheader("🏭 Live Warehouse Inventory (from BigQuery)")
+    st.subheader("🏭 View Warehouse Breakdown")
+    sku_options = report["sku"].unique().tolist()
+    selected_sku = st.selectbox("Select a SKU to view warehouse-level inventory:", options=sku_options)
 
-    for _, row in report.iterrows():
-        sku = str(row["sku"])
-        product = row["variant_label"]
-        with st.expander(f"🔍 {product}"):
-            try:
-                warehouse_df = fetch_warehouse_summary(sku)
-                if not warehouse_df.empty:
-                    st.dataframe(
-                        warehouse_df.style.format({
-                            "Total_Inventory": "{:,.0f}",
-                            "Blocked_Inventory": "{:,.0f}",
-                            "Available_Inventory": "{:,.0f}",
-                            "Blocked_%": "{:.1f}%",
-                            "Business_Loss_(₹)": "₹{:,.0f}"
-                        }),
-                        use_container_width=True
-                    )
-                else:
-                    st.info("No warehouse data found for this SKU.")
-            except Exception as e:
-                st.error(f"Error fetching warehouse data: {e}")
+    if selected_sku:
+        st.info(f"Fetching live warehouse data for SKU: `{selected_sku}`")
+        try:
+            warehouse_df = fetch_warehouse_summary(selected_sku)
+            if not warehouse_df.empty:
+                # Color highlight for Blocked %
+                def highlight_blocked(val):
+                    color = "#FF9999" if val > 50 else "#FFF6A5" if val > 20 else "#C6F6C6"
+                    return f"background-color: {color}"
+
+                st.dataframe(
+                    warehouse_df.style.applymap(highlight_blocked, subset=["Blocked_%"]).format({
+                        "Total_Inventory": "{:,.0f}",
+                        "Blocked_Inventory": "{:,.0f}",
+                        "Available_Inventory": "{:,.0f}",
+                        "Blocked_%": "{:.1f}%",
+                        "Business_Loss_(₹)": "₹{:,.0f}"
+                    }),
+                    use_container_width=True
+                )
+            else:
+                st.warning("No data found for this SKU in BigQuery.")
+        except Exception as e:
+            st.error(f"Error fetching warehouse data: {e}")
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
