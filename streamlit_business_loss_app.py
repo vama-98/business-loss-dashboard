@@ -39,7 +39,7 @@ def fetch_warehouse_summary(sku):
     df = client.query(query).to_dataframe()
     if not df.empty:
         df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # example metric
+        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
     return df.fillna(0)
 
 # -------------------------------
@@ -127,14 +127,13 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     if show_debug:
         with st.expander("🧩 Debug Preview", expanded=False):
             st.dataframe(report.head(10))
-
     return report.fillna(0)
 
 # -------------------------------
 # STREAMLIT DASHBOARD
 # -------------------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
-st.title("💸 Business Loss Dashboard (with Live Warehouse Drilldown)")
+st.title("💸 Business Loss Dashboard (with BigQuery Drilldown + Simulation)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -181,18 +180,44 @@ if report is not None and not report.empty:
     )
     st.dataframe(styled_df, use_container_width=True)
 
-    # --- Click to view SKU-level drilldown ---
+    # --- PIE CHART ---
+    st.markdown("### 🥧 Contribution to Total Business Loss")
+    total_loss = report["business_loss"].sum()
+    pie_df = report[report["business_loss"] > 0.03 * total_loss]
+    if not pie_df.empty:
+        fig = px.pie(pie_df, names="variant_label", values="business_loss",
+                     title="Contribution to Total Business Loss (Active SKUs)",
+                     color_discrete_sequence=px.colors.sequential.RdBu)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # --- SIDEBAR SIMULATION ---
+    st.sidebar.markdown("## 🧱 Block Inventory Simulation")
+    selected_product = st.sidebar.selectbox("Select Product", options=report["variant_label"].tolist())
+    qty_to_block = st.sidebar.number_input("Enter Quantity to Block", min_value=0, value=0, step=1)
+    if st.sidebar.button("Simulate Impact"):
+        row = report.loc[report["variant_label"] == selected_product].iloc[0]
+        latest_inv = row["latest_inventory"]
+        drr = row["drr"]
+        if drr <= 0:
+            st.sidebar.error("❌ Invalid DRR — cannot simulate impact.")
+        else:
+            new_doh = math.ceil((latest_inv - qty_to_block) / drr)
+            if new_doh < 15:
+                st.sidebar.warning(f"⚠️ Blocking will reduce DOH to **{new_doh} days** — risky for D2C!")
+            else:
+                st.sidebar.success(f"✅ Safe to block. DOH after block: **{new_doh} days**")
+
+    # --- WAREHOUSE BREAKDOWN (BIGQUERY) ---
     st.markdown("---")
-    st.subheader("🏭 View Warehouse Breakdown")
+    st.subheader("🏭 Live Warehouse Breakdown from BigQuery")
     sku_options = report["sku"].unique().tolist()
-    selected_sku = st.selectbox("Select a SKU to view warehouse-level inventory:", options=sku_options)
+    selected_sku = st.selectbox("Select SKU for Warehouse Breakdown:", options=sku_options)
 
     if selected_sku:
         st.info(f"Fetching live warehouse data for SKU: `{selected_sku}`")
         try:
             warehouse_df = fetch_warehouse_summary(selected_sku)
             if not warehouse_df.empty:
-                # Color highlight for Blocked %
                 def highlight_blocked(val):
                     color = "#FF9999" if val > 50 else "#FFF6A5" if val > 20 else "#C6F6C6"
                     return f"background-color: {color}"
@@ -208,8 +233,9 @@ if report is not None and not report.empty:
                     use_container_width=True
                 )
             else:
-                st.warning("No data found for this SKU in BigQuery.")
+                st.warning("No warehouse data found for this SKU in BigQuery.")
         except Exception as e:
             st.error(f"Error fetching warehouse data: {e}")
+
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
