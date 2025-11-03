@@ -100,18 +100,35 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
-    # === B2B SHEET PARSING ===
-    b2b_raw = pd.read_csv(b2b_url)
-    b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
+    # === B2B SHEET PARSING (Fixed for your row-based layout) ===
+    b2b_raw = pd.read_csv(b2b_url, header=None)
+    b2b_raw = b2b_raw.applymap(lambda x: str(x).strip() if pd.notna(x) else "")
 
-    # Identify rows containing dates (like 17-07)
-    date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
-    b2b_data = b2b_raw[date_mask].copy()
+    # Split metadata (top 5 rows) and inventory data (from row 6 onward)
+    meta_raw = b2b_raw.iloc[:5, :]
+    data_raw = b2b_raw.iloc[5:, :]
 
-    # --- Get latest B2B inventory row ---
-    if not b2b_data.empty:
-        b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
-        latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
+    # --- Extract metadata ---
+    meta_t = meta_raw.T
+    meta_t.columns = meta_t.iloc[0]
+    meta_t = meta_t.drop(meta_t.index[0])
+    meta_t.rename(columns={
+        "SKU Code": "sku",
+        "Product Name": "product_name_b2b",
+        "Size": "size_b2b",
+        "CATEGORY": "category_b2b",
+        "Range": "range_b2b"
+    }, inplace=True)
+    meta_t["sku"] = meta_t["sku"].apply(clean_sku)
+
+    # --- Extract latest inventory from date rows ---
+    data_raw.columns = b2b_raw.iloc[0, :]
+    date_mask = data_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
+    data_dates = data_raw[date_mask].copy()
+
+    if not data_dates.empty:
+        data_dates["parsed_date"] = pd.to_datetime(data_dates.iloc[:, 0], format="%d-%m", errors="coerce")
+        latest_row = data_dates.loc[data_dates["parsed_date"].idxmax()]
         b2b_latest = latest_row.drop(labels=["parsed_date"]).reset_index()
         b2b_latest.columns = ["sku", "b2b_inventory"]
     else:
@@ -120,28 +137,8 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
-    # --- Extract product metadata from top rows (before date rows) ---
-    meta_rows = b2b_raw[~date_mask].copy()
-    meta_rows = meta_rows.dropna(how="all")
-
-    meta_dict = {}
-    for label in ["SKU CODE", "PRODUCT NAME", "SIZE", "CATEGORY"]:
-        row = meta_rows[meta_rows.iloc[:, 0].astype(str).str.strip().str.upper() == label]
-        if not row.empty:
-            meta_dict[label] = row.iloc[0, 1:].values.tolist()
-
-    if "SKU CODE" in meta_dict:
-        meta_df = pd.DataFrame({
-            "sku": [clean_sku(x) for x in meta_dict.get("SKU CODE", [])],
-            "product_name_b2b": meta_dict.get("PRODUCT NAME", []),
-            "size_b2b": meta_dict.get("SIZE", []),
-            "category_b2b": meta_dict.get("CATEGORY", []),
-        })
-    else:
-        meta_df = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
-
-    # --- Merge metadata and inventory ---
-    b2b_enriched = pd.merge(b2b_latest, meta_df, on="sku", how="left")
+    # --- Merge metadata with inventory ---
+    b2b_enriched = pd.merge(b2b_latest, meta_t, on="sku", how="left")
 
     # === Merge ARR/DRR and B2B ===
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
@@ -163,7 +160,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
         with st.expander("🧩 Debug Preview", expanded=False):
             st.dataframe(report.head(10))
             st.write("B2B metadata sample:")
-            st.dataframe(meta_df.head())
+            st.dataframe(meta_t.head())
 
     return report.fillna(0)
 
@@ -211,7 +208,7 @@ if report is not None and not report.empty:
     st.markdown("### 🧾 Variant-wise Business Loss")
     display_cols = [
         "variant_label",
-        "sku", "product_name_b2b", "size_b2b", "category_b2b",
+        "sku", "product_name_b2b", "size_b2b", "category_b2b", "range_b2b",
         "latest_inventory", "b2b_inventory", "doh",
         "days_out_of_stock", "drr", "asp", "business_loss"
     ]
