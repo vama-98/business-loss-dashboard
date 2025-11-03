@@ -17,31 +17,32 @@ B2B_URL       = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W
 # BIGQUERY CONNECTION
 # -------------------------------
 @st.cache_resource
-def get_bq_client():
-    creds_dict = st.secrets["bigquery"]
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    return bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
-
-client = get_bq_client()
-
 @st.cache_data(ttl=300)
-SELECT 
-  Company_Name,
-  SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
-  SUM(
-    CASE 
-      WHEN LOWER(CAST(Status AS STRING)) = 'available'
-           AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
-      THEN CAST(Quantity AS FLOAT64)
-      ELSE 0
-    END
-  ) AS Available_Inventory
-FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
-WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
-GROUP BY Company_Name
-ORDER BY Total_Inventory DESC
+def fetch_warehouse_summary(sku):
+    query = f"""
+        SELECT 
+          Company_Name,
+          SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
+          SUM(
+            CASE 
+              WHEN LOWER(CAST(Status AS STRING)) = 'available'
+                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+              THEN CAST(Quantity AS FLOAT64)
+              ELSE 0
+            END
+          ) AS Available_Inventory
+        FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
+        WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
+        GROUP BY Company_Name
+        ORDER BY Total_Inventory DESC
+    """
+    df = client.query(query).to_dataframe()
 
+    if not df.empty:
+        # Optional: compute a simple business loss metric placeholder
+        df["Business_Loss_(₹)"] = (df["Total_Inventory"] - df["Available_Inventory"]) * 200
 
+    return df.fillna(0)
 # -------------------------------
 # HELPERS
 # -------------------------------
@@ -270,6 +271,7 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
 
 
