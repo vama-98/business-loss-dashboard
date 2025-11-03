@@ -1,4 +1,4 @@
-# This Works for Real — Final Version with Blocked Inventory Section
+# Final Integrated Business Loss Dashboard (Warehouse + Blocked Inventory Unified)
 
 import pandas as pd
 import streamlit as st
@@ -27,24 +27,16 @@ client = get_bq_client()
 
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
+    """Fetch warehouse inventory summary (excluding blocked logic)"""
     query = f"""
         SELECT 
           Company_Name,
           SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
           SUM(
             CASE 
-              WHEN LOWER(CAST(Locked AS STRING)) = 'true'
-                   AND LOWER(CAST(Status AS STRING)) = 'available'
+              WHEN LOWER(CAST(Status AS STRING)) = 'available'
                    AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
-              THEN CAST(Quantity AS FLOAT64)
-              ELSE 0
-            END
-          ) AS Blocked_Inventory,
-          SUM(
-            CASE 
-              WHEN LOWER(CAST(Locked AS STRING)) = 'false'
-                   AND LOWER(CAST(Status AS STRING)) = 'available'
-                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+                   AND LOWER(CAST(Locked AS STRING)) = 'false'
               THEN CAST(Quantity AS FLOAT64)
               ELSE 0
             END
@@ -57,9 +49,6 @@ def fetch_warehouse_summary(sku):
         ORDER BY Total_Inventory DESC
     """
     df = client.query(query).to_dataframe()
-    if not df.empty:
-        df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
     return df.fillna(0)
 
 # -------------------------------
@@ -120,7 +109,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
-    # === B2B SHEET PARSING (Row-based layout) ===
+    # === B2B SHEET PARSING ===
     b2b_raw = pd.read_csv(b2b_url, header=None)
     b2b_raw = b2b_raw.applymap(lambda x: str(x).strip() if pd.notna(x) else "")
     meta_raw = b2b_raw.iloc[:5, :]
@@ -171,7 +160,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 # STREAMLIT DASHBOARD
 # -------------------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
-st.title("💸 Business Loss Dashboard (with BigQuery Drilldown + Simulation)")
+st.title("💸 Business Loss Dashboard (Unified Warehouse + Blocked Inventory)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -199,15 +188,6 @@ if report is not None and not report.empty:
     c3.metric("Avg DRR", round(report["drr"].mean(), 1))
     c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
 
-    def highlight_doh(row):
-        if row["latest_inventory"] == 0 or row["doh"] <= 7:
-            color = "background-color: #FFC7C7"
-        elif 8 <= row["doh"] <= 15:
-            color = "background-color: #FFF6A5"
-        else:
-            color = ""
-        return [color]*len(row)
-
     st.markdown("### 🧾 Variant-wise Business Loss")
     display_cols = [
         "variant_label",
@@ -218,96 +198,74 @@ if report is not None and not report.empty:
     for c in display_cols:
         if c not in report.columns:
             report[c] = ""
-    styled_df = (
-        report[display_cols]
-        .style.apply(highlight_doh, axis=1)
-        .format({
+    st.dataframe(
+        report[display_cols].style.format({
             "latest_inventory": "{:.0f}",
             "b2b_inventory": "{:.0f}",
             "drr": "{:.1f}",
             "asp": "₹{:.0f}",
             "business_loss": "₹{:.0f}"
-        })
+        }),
+        use_container_width=True
     )
-    st.dataframe(styled_df, use_container_width=True)
 
-    # --- PIE CHART ---
-    st.markdown("### 🥧 Contribution to Total Business Loss")
-    total_loss = report["business_loss"].sum()
-    pie_df = report[report["business_loss"] > 0.03 * total_loss]
-    if not pie_df.empty:
-        fig = px.pie(pie_df, names="variant_label", values="business_loss",
-                     title="Contribution to Total Business Loss (Active SKUs)",
-                     color_discrete_sequence=px.colors.sequential.RdBu)
-        st.plotly_chart(fig, use_container_width=True)
-
-    # --- WAREHOUSE BREAKDOWN ---
+    # --- UNIFIED WAREHOUSE + BLOCKED INVENTORY SECTION ---
     st.markdown("---")
-    st.subheader("🏭 Live Warehouse Breakdown from BigQuery")
+    st.subheader("🏭 Live Warehouse + Blocked Inventory (from BigQuery)")
+
     sku_options = report["sku"].unique().tolist()
     selected_sku = st.selectbox("Select SKU for Warehouse Breakdown:", options=sku_options)
 
-    if selected_sku:
-        st.info(f"Fetching live warehouse data for SKU: `{selected_sku}`")
-        try:
-            warehouse_df = fetch_warehouse_summary(selected_sku)
-            if not warehouse_df.empty:
-                def highlight_blocked(val):
-                    color = "#FF9999" if val > 50 else "#FFF6A5" if val > 20 else "#C6F6C6"
-                    return f"background-color: {color}"
-
-                st.dataframe(
-                    warehouse_df.style.applymap(highlight_blocked, subset=["Blocked_%"]).format({
-                        "Total_Inventory": "{:,.0f}",
-                        "Blocked_Inventory": "{:,.0f}",
-                        "Available_Inventory": "{:,.0f}",
-                        "Blocked_%": "{:.1f}%",
-                        "Business_Loss_(₹)": "₹{:,.0f}"
-                    }),
-                    use_container_width=True
-                )
-            else:
-                st.warning("No warehouse data found for this SKU in BigQuery.")
-        except Exception as e:
-            st.error(f"Error fetching warehouse data: {e}")
-
-    # --- BLOCKED INVENTORY TABLE (Below Warehouse Breakdown) ---
-    st.markdown("---")
-    st.subheader("🚫 Blocked Inventory (from BigQuery)")
-
     @st.cache_data(ttl=600)
-    def fetch_blocked_inventory():
+    def fetch_blocked_inventory_clean():
         query = """
-            SELECT 
-              Location,
-              Product_Name,
-              SKU,
-              EAN,
-              Total_Blocked_Inventory
+            SELECT Location, Product_Name, SKU, EAN, Total_Blocked_Inventory
             FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
             WHERE Total_Blocked_Inventory IS NOT NULL
-            ORDER BY Total_Blocked_Inventory DESC
         """
         df = client.query(query).to_dataframe()
         df["SKU"] = df["SKU"].astype(str).str.replace("`", "").str.strip()
         df["Total_Blocked_Inventory"] = pd.to_numeric(df["Total_Blocked_Inventory"], errors="coerce").fillna(0)
         if "EAN" in df.columns:
             df.drop(columns=["EAN"], inplace=True)
+        location_map = {
+            "Heavenly Secrets Private Limited - Bangalore": "Bangalore",
+            "Heavenly Secrets Private Limited - Mumbai - B2B": "Mumbai B2B",
+            "Heavenly Secrets Pvt Ltd - Kolkata": "Kolkata",
+            "Heavenly Secrets Private Limited - Emiza Bilaspur": "Bilaspur",
+        }
+        df["Location"] = df["Location"].replace(location_map)
         return df.fillna("")
 
-    try:
-        blocked_df = fetch_blocked_inventory()
-        if not blocked_df.empty:
+    if selected_sku:
+        st.info(f"Fetching live warehouse and blocked data for SKU: `{selected_sku}`")
+        try:
+            warehouse_df = fetch_warehouse_summary(selected_sku)
+            blocked_df = fetch_blocked_inventory_clean()
+            blocked_filtered = blocked_df[blocked_df["SKU"] == selected_sku]
+            merged = pd.merge(
+                warehouse_df,
+                blocked_filtered[["Location", "Total_Blocked_Inventory"]],
+                left_on="Company_Name",
+                right_on="Location",
+                how="left"
+            ).fillna({"Total_Blocked_Inventory": 0})
+            merged.drop(columns=["Location"], inplace=True, errors="ignore")
+            merged.rename(columns={"Total_Blocked_Inventory": "Blocked_Inventory"}, inplace=True)
+            merged["Blocked_%"] = (merged["Blocked_Inventory"] / merged["Total_Inventory"] * 100).round(1)
+            merged["Business_Loss_(₹)"] = merged["Blocked_Inventory"] * 200
             st.dataframe(
-                blocked_df.style.format({
-                    "Total_Blocked_Inventory": "{:,.0f}"
+                merged.style.format({
+                    "Total_Inventory": "{:,.0f}",
+                    "Available_Inventory": "{:,.0f}",
+                    "Blocked_Inventory": "{:,.0f}",
+                    "Blocked_%": "{:.1f}%",
+                    "Business_Loss_(₹)": "₹{:,.0f}"
                 }),
                 use_container_width=True
             )
-        else:
-            st.warning("No blocked inventory records found.")
-    except Exception as e:
-        st.error(f"Error fetching blocked inventory data: {e}")
+        except Exception as e:
+            st.error(f"Error fetching merged warehouse data: {e}")
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
