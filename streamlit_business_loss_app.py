@@ -84,7 +84,6 @@ def reshape_inventory(sheet_url, start_date=None, end_date=None):
 # BUSINESS LOSS CALCULATION
 # -------------------------------
 def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end_date, show_debug=False):
-    # === Inventory logic (unchanged)
     tidy = reshape_inventory(inventory_url, start_date, end_date)
     tidy = tidy[tidy["status"] == "active"]
 
@@ -93,7 +92,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     latest_inv.rename(columns={"inventory": "latest_inventory"}, inplace=True)
     report = pd.merge(oos_days, latest_inv, on="variant_id", how="outer").fillna(0)
 
-    # === ARR/DRR logic (unchanged)
+    # === ARR/DRR ===
     arr_drr = pd.read_csv(arr_drr_url)
     arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
     arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
@@ -101,15 +100,14 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
-    # === B2B logic (same as before, latest date-based read)
+    # === B2B ===
     b2b_raw = pd.read_csv(b2b_url)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
 
-    # Identify rows containing dates (like 17-07, 18-07)
+    # Identify rows containing dates
     date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[date_mask].copy()
 
-    # Extract latest date row for B2B inventory
     if not b2b_data.empty:
         b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
         latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
@@ -121,38 +119,49 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
-    # === NEW: extract metadata from same b2b_raw (same logic style)
+    # === Metadata Extraction (Fixed and Robust)
     header_map = {
         "SKU CODE": "sku",
         "PRODUCT NAME": "product_name_b2b",
         "SIZE": "size_b2b",
         "CATEGORY": "category_b2b"
     }
-    meta_rows = b2b_raw[b2b_raw.iloc[:, 0].astype(str).str.strip().str.upper().isin(header_map.keys())].copy()
 
-    if not meta_rows.empty:
-        meta_rows["__label__"] = meta_rows.iloc[:, 0].astype(str).str.strip().str.upper()
-        meta_t = meta_rows.set_index("__label__").iloc[:, 1:].T  # skip first column, transpose SKU columns
-        meta_t = meta_t.rename(columns=header_map)
-        meta_t["sku"] = meta_t["sku"].apply(clean_sku)
-        b2b_meta = meta_t.dropna(subset=["sku"])
+    upper_cols = [str(c).strip().upper() for c in b2b_raw.columns]
+
+    if any(h in upper_cols for h in header_map.keys()):
+        # Wide format (normal columns)
+        possible_cols = [c for c in header_map.keys() if c in b2b_raw.columns]
+        b2b_meta = b2b_raw[possible_cols].rename(columns=header_map)
+        b2b_meta["sku"] = b2b_meta["sku"].apply(clean_sku)
     else:
-        b2b_meta = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
+        # Transposed format (metadata in rows)
+        meta_rows = b2b_raw[b2b_raw.iloc[:, 0].astype(str).str.strip().str.upper().isin(header_map.keys())].copy()
+        if not meta_rows.empty:
+            meta_rows["__label__"] = meta_rows.iloc[:, 0].astype(str).str.strip().str.upper()
+            meta_t = meta_rows.set_index("__label__").iloc[:, 1:].T
+            meta_t = meta_t.rename(columns=header_map)
+            if "sku" in meta_t.columns:
+                meta_t["sku"] = meta_t["sku"].apply(clean_sku)
+            b2b_meta = meta_t.dropna(subset=["sku"]) if "sku" in meta_t.columns else pd.DataFrame()
+        else:
+            b2b_meta = pd.DataFrame()
 
-    # Merge metadata only where SKU exists — no blanks/zeros
+    for col in ["sku", "product_name_b2b", "size_b2b", "category_b2b"]:
+        if col not in b2b_meta.columns:
+            b2b_meta[col] = ""
+
     b2b_enriched = pd.merge(b2b_latest, b2b_meta, on="sku", how="left")
 
-    # === Merge ARR/DRR and B2B data into report
+    # === Merge ARR/DRR and B2B
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
                       on="variant_id", how="left")
     report["sku"] = report["sku"].apply(clean_sku)
     report = pd.merge(report, b2b_enriched, on="sku", how="left").fillna(0)
 
-    # === Numeric conversions (unchanged)
     for col in ["drr", "asp", "latest_inventory"]:
         report[col] = pd.to_numeric(report[col], errors="coerce").fillna(0)
 
-    # === Calculations (unchanged)
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
     report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"]/x["drr"]) if x["drr"] > 0 else 0, axis=1)
     report["variant_label"] = report.apply(
@@ -212,7 +221,7 @@ if report is not None and not report.empty:
     st.markdown("### 🧾 Variant-wise Business Loss")
     display_cols = [
         "variant_label",
-        "sku", "product_name_b2b", "size_b2b", "category_b2b",  # added fields
+        "sku", "product_name_b2b", "size_b2b", "category_b2b",
         "latest_inventory", "b2b_inventory", "doh",
         "days_out_of_stock", "drr", "asp", "business_loss"
     ]
@@ -242,7 +251,7 @@ if report is not None and not report.empty:
                      color_discrete_sequence=px.colors.sequential.RdBu)
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- WAREHOUSE BREAKDOWN (BIGQUERY) ---
+    # --- WAREHOUSE BREAKDOWN ---
     st.markdown("---")
     st.subheader("🏭 Live Warehouse Breakdown from BigQuery")
     sku_options = report["sku"].unique().tolist()
