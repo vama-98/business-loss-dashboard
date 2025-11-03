@@ -25,40 +25,21 @@ def get_bq_client():
 client = get_bq_client()
 
 @st.cache_data(ttl=300)
-@st.cache_data(ttl=300)
-def fetch_warehouse_summary(sku):
-    query = f"""
-        SELECT 
-          Company_Name,
-          SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
-          SUM(
-            CASE 
-              WHEN LOWER(CAST(Status AS STRING)) = 'available' 
-                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
-              THEN CAST(Quantity AS FLOAT64)
-              ELSE 0
-            END
-          ) AS Available_Inventory_Filtered,
-          SUM(
-            CASE 
-              WHEN LOWER(CAST(Status AS STRING)) <> 'available'
-                   OR LOWER(CAST(Greaterthaneig AS STRING)) <> 'true'
-              THEN CAST(Quantity AS FLOAT64)
-              ELSE 0
-            END
-          ) AS Other_Inventory
-        FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
-        WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
-        GROUP BY Company_Name
-        ORDER BY Total_Inventory DESC
-    """
-    df = client.query(query).to_dataframe()
-
-    if not df.empty:
-        df["Available_%"] = (df["Available_Inventory_Filtered"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Other_Inventory"] * 200  # optional metric
-
-    return df.fillna(0)
+SELECT 
+  Company_Name,
+  SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
+  SUM(
+    CASE 
+      WHEN LOWER(CAST(Status AS STRING)) = 'available'
+           AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+      THEN CAST(Quantity AS FLOAT64)
+      ELSE 0
+    END
+  ) AS Available_Inventory
+FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
+WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
+GROUP BY Company_Name
+ORDER BY Total_Inventory DESC
 
 
 # -------------------------------
@@ -289,6 +270,7 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
 
 
