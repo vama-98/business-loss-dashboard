@@ -79,7 +79,15 @@ def fetch_blocked_inventory():
         ORDER BY Total_Blocked_Inventory DESC
     """
     df = client.query(query).to_dataframe()
+
+    # Clean SKU (remove any quotes or backticks)
+    df["SKU"] = df["SKU"].astype(str).str.replace("`", "").str.strip()
     df["Total_Blocked_Inventory"] = pd.to_numeric(df["Total_Blocked_Inventory"], errors="coerce").fillna(0)
+
+    # Drop EAN column
+    if "EAN" in df.columns:
+        df.drop(columns=["EAN"], inplace=True)
+
     return df.fillna("")
 
 try:
@@ -324,5 +332,6 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
 
