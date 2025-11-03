@@ -27,26 +27,62 @@ client = get_bq_client()
 # BIGQUERY FUNCTION
 # -------------------------------
 @st.cache_data(ttl=300)
+@st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
     query = f"""
-        SELECT 
-          Company_Name,
-          SAFE_CAST(Sku AS STRING) AS Sku,
-          SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
-          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'true' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Blocked_Inventory,
-          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'false' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Available_Inventory
-        FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
-        WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
-          AND LOWER(CAST(Status AS STRING)) = 'available'
-          AND (SAFE_CAST(GreaterThanEig AS BOOL) OR SAFE_CAST(GREATERTHANEIG AS BOOL)) = TRUE
-        GROUP BY Company_Name, Sku
-        ORDER BY Total_Inventory DESC
+        WITH cleaned_blocked AS (
+            SELECT
+              TRIM(REPLACE(SKU, "'", "")) AS Clean_SKU,
+              Location AS Company_Name,
+              SUM(CAST(Total_Blocked_Inventory AS FLOAT64)) AS Blocked_Inventory
+            FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
+            WHERE TRIM(REPLACE(SKU, "'", "")) = '{sku}'
+            GROUP BY Company_Name, Clean_SKU
+        ),
+        available_data AS (
+            SELECT
+              Company_Name,
+              SAFE_CAST(Sku AS STRING) AS Sku,
+              SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory
+            FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
+            WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
+              AND LOWER(CAST(Status AS STRING)) = 'available'
+              AND (SAFE_CAST(GreaterThanEig AS BOOL) OR SAFE_CAST(GREATERTHANEIG AS BOOL)) = TRUE
+            GROUP BY Company_Name, Sku
+        )
+        SELECT
+          a.Company_Name,
+          a.Sku,
+          a.Total_Inventory,
+          IFNULL(b.Blocked_Inventory, 0) AS Blocked_Inventory,
+          (a.Total_Inventory - IFNULL(b.Blocked_Inventory, 0)) AS Available_Inventory
+        FROM available_data a
+        LEFT JOIN cleaned_blocked b
+          ON a.Company_Name = b.Company_Name
+          AND a.Sku = b.Clean_SKU
+        ORDER BY a.Total_Inventory DESC
     """
+
     df = client.query(query).to_dataframe()
+
     if not df.empty:
         df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200
+        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
+
+        # ✅ Add total row at bottom
+        total_row = pd.DataFrame({
+            "Company_Name": ["TOTAL"],
+            "Sku": [df["Sku"].iloc[0]],
+            "Total_Inventory": [df["Total_Inventory"].sum()],
+            "Blocked_Inventory": [df["Blocked_Inventory"].sum()],
+            "Available_Inventory": [df["Available_Inventory"].sum()],
+            "Blocked_%": [(df["Blocked_Inventory"].sum() / df["Total_Inventory"].sum() * 100) if df["Total_Inventory"].sum() > 0 else 0],
+            "Business_Loss_(₹)": [df["Business_Loss_(₹)"].sum()]
+        })
+        df = pd.concat([df, total_row], ignore_index=True)
+
     return df.fillna(0)
+
 
 # -------------------------------
 # HELPERS
@@ -275,3 +311,4 @@ if report is not None and not report.empty:
             st.error(f"Error fetching warehouse data: {e}")
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
