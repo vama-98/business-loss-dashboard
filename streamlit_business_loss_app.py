@@ -35,7 +35,7 @@ def fetch_warehouse_summary(sku):
         -- Blocked inventory (clean SKU + standardized locations)
         WITH blocked AS (
             SELECT
-              REPLACE(REPLACE(TRIM(SKU), "`", ""), "‘", "") AS Clean_SKU,
+              REPLACE(REPLACE(TRIM(SKU), "'", ""), "‘", "") AS Clean_SKU,
               CASE 
                 WHEN Location = 'Heavenly Secrets Private Limited - Emiza Bilaspur' THEN 'Bilaspur'
                 WHEN Location = 'Heavenly Secrets Private Limited - Bangalore'      THEN 'Bangalore'
@@ -335,5 +335,3 @@ if report is not None and not report.empty:
             st.error(f"Error fetching warehouse data: {e}")
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
-
-
