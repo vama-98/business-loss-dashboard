@@ -61,6 +61,41 @@ def fetch_warehouse_summary(sku):
         df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
     return df.fillna(0)
 
+# --- BLOCKED INVENTORY TABLE ---
+st.markdown("---")
+st.subheader("🚫 Blocked Inventory (from BigQuery)")
+
+@st.cache_data(ttl=600)
+def fetch_blocked_inventory():
+    query = """
+        SELECT 
+          Location,
+          Product_Name,
+          SKU,
+          EAN,
+          Total_Blocked_Inventory
+        FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
+        WHERE Total_Blocked_Inventory IS NOT NULL
+        ORDER BY Total_Blocked_Inventory DESC
+    """
+    df = client.query(query).to_dataframe()
+    df["Total_Blocked_Inventory"] = pd.to_numeric(df["Total_Blocked_Inventory"], errors="coerce").fillna(0)
+    return df.fillna("")
+
+try:
+    blocked_df = fetch_blocked_inventory()
+    if not blocked_df.empty:
+        st.dataframe(
+            blocked_df.style.format({
+                "Total_Blocked_Inventory": "{:,.0f}"
+            }),
+            use_container_width=True
+        )
+    else:
+        st.warning("No blocked inventory records found.")
+except Exception as e:
+    st.error(f"Error fetching blocked inventory data: {e}")
+
 # -------------------------------
 # HELPERS
 # -------------------------------
@@ -289,4 +324,5 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
