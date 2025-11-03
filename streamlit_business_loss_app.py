@@ -32,7 +32,7 @@ def fetch_warehouse_summary(sku):
     query = f"""
         WITH cleaned_blocked AS (
             SELECT
-              TRIM(REPLACE(SKU, "'", "")) AS Clean_SKU,
+              TRIM(REPLACE(SKU, "`", "")) AS Clean_SKU,
               Location AS Company_Name,
               SUM(CAST(Total_Blocked_Inventory AS FLOAT64)) AS Blocked_Inventory
             FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
@@ -311,4 +311,5 @@ if report is not None and not report.empty:
             st.error(f"Error fetching warehouse data: {e}")
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
