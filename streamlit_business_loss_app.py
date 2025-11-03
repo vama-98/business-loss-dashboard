@@ -1,4 +1,5 @@
-#This Works for real!!
+# This Works for Real — Final Version with Blocked Inventory Section
+
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -61,49 +62,6 @@ def fetch_warehouse_summary(sku):
         df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
     return df.fillna(0)
 
-# --- BLOCKED INVENTORY TABLE ---
-st.markdown("---")
-st.subheader("🚫 Blocked Inventory (from BigQuery)")
-
-@st.cache_data(ttl=600)
-def fetch_blocked_inventory():
-    query = """
-        SELECT 
-          Location,
-          Product_Name,
-          SKU,
-          EAN,
-          Total_Blocked_Inventory
-        FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
-        WHERE Total_Blocked_Inventory IS NOT NULL
-        ORDER BY Total_Blocked_Inventory DESC
-    """
-    df = client.query(query).to_dataframe()
-
-    # Clean SKU (remove any quotes or backticks)
-    df["SKU"] = df["SKU"].astype(str).str.replace("`", "").str.strip()
-    df["Total_Blocked_Inventory"] = pd.to_numeric(df["Total_Blocked_Inventory"], errors="coerce").fillna(0)
-
-    # Drop EAN column
-    if "EAN" in df.columns:
-        df.drop(columns=["EAN"], inplace=True)
-
-    return df.fillna("")
-
-try:
-    blocked_df = fetch_blocked_inventory()
-    if not blocked_df.empty:
-        st.dataframe(
-            blocked_df.style.format({
-                "Total_Blocked_Inventory": "{:,.0f}"
-            }),
-            use_container_width=True
-        )
-    else:
-        st.warning("No blocked inventory records found.")
-except Exception as e:
-    st.error(f"Error fetching blocked inventory data: {e}")
-
 # -------------------------------
 # HELPERS
 # -------------------------------
@@ -162,15 +120,11 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
-    # === B2B SHEET PARSING (Fixed for your row-based layout) ===
+    # === B2B SHEET PARSING (Row-based layout) ===
     b2b_raw = pd.read_csv(b2b_url, header=None)
     b2b_raw = b2b_raw.applymap(lambda x: str(x).strip() if pd.notna(x) else "")
-
-    # Split metadata (top 5 rows) and inventory data (from row 6 onward)
     meta_raw = b2b_raw.iloc[:5, :]
     data_raw = b2b_raw.iloc[5:, :]
-
-    # --- Extract metadata ---
     meta_t = meta_raw.T
     meta_t.columns = meta_t.iloc[0]
     meta_t = meta_t.drop(meta_t.index[0])
@@ -182,12 +136,9 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
         "Range": "range_b2b"
     }, inplace=True)
     meta_t["sku"] = meta_t["sku"].apply(clean_sku)
-
-    # --- Extract latest inventory from date rows ---
     data_raw.columns = b2b_raw.iloc[0, :]
     date_mask = data_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     data_dates = data_raw[date_mask].copy()
-
     if not data_dates.empty:
         data_dates["parsed_date"] = pd.to_datetime(data_dates.iloc[:, 0], format="%d-%m", errors="coerce")
         latest_row = data_dates.loc[data_dates["parsed_date"].idxmax()]
@@ -195,11 +146,8 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
         b2b_latest.columns = ["sku", "b2b_inventory"]
     else:
         b2b_latest = pd.DataFrame(columns=["sku", "b2b_inventory"])
-
     b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
-
-    # --- Merge metadata with inventory ---
     b2b_enriched = pd.merge(b2b_latest, meta_t, on="sku", how="left")
 
     # === Merge ARR/DRR and B2B ===
@@ -217,13 +165,6 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
         lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else str(x["variant_id"]),
         axis=1
     )
-
-    if show_debug:
-        with st.expander("🧩 Debug Preview", expanded=False):
-            st.dataframe(report.head(10))
-            st.write("B2B metadata sample:")
-            st.dataframe(meta_t.head())
-
     return report.fillna(0)
 
 # -------------------------------
@@ -330,8 +271,43 @@ if report is not None and not report.empty:
         except Exception as e:
             st.error(f"Error fetching warehouse data: {e}")
 
+    # --- BLOCKED INVENTORY TABLE (Below Warehouse Breakdown) ---
+    st.markdown("---")
+    st.subheader("🚫 Blocked Inventory (from BigQuery)")
+
+    @st.cache_data(ttl=600)
+    def fetch_blocked_inventory():
+        query = """
+            SELECT 
+              Location,
+              Product_Name,
+              SKU,
+              EAN,
+              Total_Blocked_Inventory
+            FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
+            WHERE Total_Blocked_Inventory IS NOT NULL
+            ORDER BY Total_Blocked_Inventory DESC
+        """
+        df = client.query(query).to_dataframe()
+        df["SKU"] = df["SKU"].astype(str).str.replace("`", "").str.strip()
+        df["Total_Blocked_Inventory"] = pd.to_numeric(df["Total_Blocked_Inventory"], errors="coerce").fillna(0)
+        if "EAN" in df.columns:
+            df.drop(columns=["EAN"], inplace=True)
+        return df.fillna("")
+
+    try:
+        blocked_df = fetch_blocked_inventory()
+        if not blocked_df.empty:
+            st.dataframe(
+                blocked_df.style.format({
+                    "Total_Blocked_Inventory": "{:,.0f}"
+                }),
+                use_container_width=True
+            )
+        else:
+            st.warning("No blocked inventory records found.")
+    except Exception as e:
+        st.error(f"Error fetching blocked inventory data: {e}")
+
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
-
-
-
