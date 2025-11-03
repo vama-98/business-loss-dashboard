@@ -23,9 +23,9 @@ def get_bq_client():
 
 client = get_bq_client()
 
-@st.cache_data(ttl=300)
-@st.cache_data(ttl=300)
-@st.cache_data(ttl=300)
+# -------------------------------
+# BIGQUERY FUNCTION
+# -------------------------------
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
     query = f"""
@@ -45,8 +45,9 @@ def fetch_warehouse_summary(sku):
     df = client.query(query).to_dataframe()
     if not df.empty:
         df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
+        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200
     return df.fillna(0)
+
 # -------------------------------
 # HELPERS
 # -------------------------------
@@ -120,20 +121,26 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
-    # --- NEW: read header rows with same logic ---
     header_map = {
         "SKU CODE": "sku",
         "PRODUCT NAME": "product_name_b2b",
         "SIZE": "size_b2b",
         "CATEGORY": "category_b2b"
     }
+
     meta_rows = b2b_raw[b2b_raw.iloc[:, 0].astype(str).str.strip().str.upper().isin(header_map.keys())].copy()
     if not meta_rows.empty:
         meta_rows["__label__"] = meta_rows.iloc[:, 0].astype(str).str.strip().str.upper()
         meta_t = meta_rows.set_index("__label__").iloc[:, 1:].T
         meta_t = meta_t.rename(columns=header_map)
-        meta_t["sku"] = meta_t["sku"].apply(clean_sku)
-        b2b_meta = meta_t.dropna(subset=["sku"])
+        for col in ["sku", "product_name_b2b", "size_b2b", "category_b2b"]:
+            if col not in meta_t.columns:
+                meta_t[col] = None
+        if "sku" in meta_t.columns:
+            meta_t["sku"] = meta_t["sku"].apply(clean_sku)
+            b2b_meta = meta_t.dropna(subset=["sku"], how="any")
+        else:
+            b2b_meta = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
     else:
         b2b_meta = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
 
@@ -158,6 +165,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
         with st.expander("🧩 Debug Preview", expanded=False):
             st.dataframe(report.head(10))
             st.dataframe(b2b_meta.head())
+
     return report.fillna(0)
 
 # -------------------------------
@@ -181,9 +189,6 @@ if st.button("🚀 Calculate Business Loss"):
 
 report = st.session_state.get("report", None)
 
-# -------------------------------
-# VISUALIZATION SECTION
-# -------------------------------
 if report is not None and not report.empty:
     st.subheader("📊 Business Loss Summary Metrics")
     c1, c2, c3, c4 = st.columns(4)
@@ -268,9 +273,5 @@ if report is not None and not report.empty:
                 st.warning("No warehouse data found for this SKU in BigQuery.")
         except Exception as e:
             st.error(f"Error fetching warehouse data: {e}")
-
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
-
-
-
