@@ -25,24 +25,25 @@ def get_bq_client():
 client = get_bq_client()
 
 # -------------------------------
-# SKU CLEANING FIX (Encoding)
+# HELPERS
 # -------------------------------
-def clean_sku_input(text):
-    if not text:
+def clean_id(v):
+    return str(v).strip().replace(".0", "").replace(".00", "")
+
+def clean_sku(s):
+    if pd.isna(s):
         return ""
-    text = unicodedata.normalize("NFKD", str(text))
-    text = text.encode("ascii", "ignore").decode("ascii")
-    return text.strip().upper()
+    s = unicodedata.normalize("NFKD", str(s))
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return s.strip().upper()
 
 # -------------------------------
-# FIXED BIGQUERY FUNCTION
+# FETCH WAREHOUSE SUMMARY (FIXED)
 # -------------------------------
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
-    sku = clean_sku_input(sku)
-
+    sku = clean_sku(sku)
     query = f"""
-        -- Blocked inventory from BlockedInv
         WITH blocked AS (
             SELECT
               REPLACE(REPLACE(TRIM(SKU), "'", ""), "‘", "") AS Clean_SKU,
@@ -58,8 +59,6 @@ def fetch_warehouse_summary(sku):
             WHERE REPLACE(REPLACE(TRIM(SKU), "'", ""), "‘", "") = '{sku}'
             GROUP BY Warehouse, Clean_SKU
         ),
-
-        -- Available inventory from Live Inventory
         available AS (
             SELECT
               CASE 
@@ -77,14 +76,11 @@ def fetch_warehouse_summary(sku):
               AND (SAFE_CAST(GreaterThanEig AS BOOL) OR SAFE_CAST(GREATERTHANEIG AS BOOL)) = TRUE
             GROUP BY Warehouse, Sku
         ),
-
-        -- Ensure all warehouses appear
         all_warehouses AS (
             SELECT DISTINCT Warehouse FROM blocked
             UNION DISTINCT
             SELECT DISTINCT Warehouse FROM available
         )
-
         SELECT
           w.Warehouse AS Company_Name,
           '{sku}' AS Sku,
@@ -103,7 +99,6 @@ def fetch_warehouse_summary(sku):
             df["Blocked_Inventory"] / df["Total_Inventory"].replace(0, pd.NA) * 100
         ).fillna(0).round(1)
         df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200
-
         total_row = pd.DataFrame({
             "Company_Name": ["TOTAL"],
             "Sku": [sku],
@@ -117,13 +112,144 @@ def fetch_warehouse_summary(sku):
             "Business_Loss_(₹)": [df["Business_Loss_(₹)"].sum()]
         })
         df = pd.concat([df, total_row], ignore_index=True)
-
     return df.fillna(0)
 
 # -------------------------------
-# REST OF YOUR EXISTING CODE BELOW
+# INVENTORY + LOSS CALCULATION
 # -------------------------------
-# (unchanged business loss calculation, visualization, simulation, and layout)
-# — This includes calculate_business_loss(), reshape_inventory(), pie chart, DOH highlights, etc.
-# Everything else stays EXACTLY the same as your working version.
+def reshape_inventory(sheet_url, start_date=None, end_date=None):
+    df = pd.read_csv(sheet_url, header=[0, 1])
+    new_cols, last_variant = [], None
+    for top, sub in df.columns:
+        top, sub = str(top).strip().lower(), str(sub).strip().lower()
+        if "unnamed" not in top and top != "time stamp":
+            last_variant = top
+        if sub in ["status", "inventory"]:
+            new_cols.append(f"{last_variant}_{sub}" if last_variant else sub)
+        elif top == "time stamp":
+            new_cols.append("timestamp")
+        else:
+            new_cols.append(f"{top}_{sub}".strip("_"))
+    df.columns = new_cols
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["date"] = df["timestamp"].dt.date
+    long_df = df.melt(id_vars=["timestamp", "date"], var_name="variant_field", value_name="value")
+    long_df[["variant_id", "field"]] = long_df["variant_field"].str.rsplit("_", n=1, expand=True)
+    tidy = long_df.pivot_table(index=["timestamp", "date", "variant_id"], columns="field",
+                               values="value", aggfunc="first").reset_index()
+    tidy.columns = [str(c).strip().lower() for c in tidy.columns]
+    tidy["inventory"] = pd.to_numeric(tidy.get("inventory", 0), errors="coerce").fillna(0)
+    tidy["status"] = tidy.get("status", "").astype(str).str.lower()
+    if start_date:
+        tidy = tidy[tidy["date"] >= pd.to_datetime(start_date).date()]
+    if end_date:
+        tidy = tidy[tidy["date"] <= pd.to_datetime(end_date).date()]
+    return tidy
 
+def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end_date, show_debug=False):
+    tidy = reshape_inventory(inventory_url, start_date, end_date)
+    tidy = tidy[tidy["status"] == "active"]
+    oos_days = tidy[tidy["inventory"] == 0].groupby("variant_id").size().reset_index(name="days_out_of_stock")
+    latest_inv = tidy.sort_values("timestamp").groupby("variant_id").tail(1)[["variant_id", "inventory"]]
+    latest_inv.rename(columns={"inventory": "latest_inventory"}, inplace=True)
+    report = pd.merge(oos_days, latest_inv, on="variant_id", how="outer").fillna(0)
+    arr_drr = pd.read_csv(arr_drr_url)
+    arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
+    arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
+    arr_drr["variant_id"] = arr_drr["variant_id"].apply(clean_id)
+    arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
+    report["variant_id"] = report["variant_id"].apply(clean_id)
+    b2b_raw = pd.read_csv(b2b_url)
+    b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
+    date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\\d{2}-\\d{2}")
+    b2b_data = b2b_raw[date_mask].copy()
+    b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
+    latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
+    b2b_latest = latest_row.drop(labels=["parsed_date"]).reset_index()
+    b2b_latest.columns = ["sku", "b2b_inventory"]
+    b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
+    b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
+    report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
+                      on="variant_id", how="left")
+    report["sku"] = report["sku"].apply(clean_sku)
+    report = pd.merge(report, b2b_latest, on="sku", how="left").fillna(0)
+    for col in ["drr", "asp", "latest_inventory"]:
+        report[col] = pd.to_numeric(report[col], errors="coerce").fillna(0)
+    report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
+    report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"]/x["drr"]) if x["drr"] > 0 else 0, axis=1)
+    report["variant_label"] = report.apply(
+        lambda x: f"{x['product_title']} ({x['variant_id']})" if pd.notna(x["product_title"]) else str(x["variant_id"]),
+        axis=1
+    )
+    if show_debug:
+        with st.expander("🧩 Debug Preview", expanded=False):
+            st.dataframe(report.head(10))
+    return report.fillna(0)
+
+# -------------------------------
+# STREAMLIT DASHBOARD
+# -------------------------------
+st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
+st.title("💸 Business Loss Dashboard (with BigQuery Drilldown + Simulation)")
+
+col1, col2 = st.columns(2)
+with col1:
+    start_date = st.date_input("Start Date")
+with col2:
+    end_date = st.date_input("End Date")
+
+show_debug = st.toggle("Show Debug Info", value=False)
+
+if st.button("🚀 Calculate Business Loss"):
+    with st.spinner("Crunching numbers... please wait ⏳"):
+        report = calculate_business_loss(INVENTORY_URL, ARR_DRR_URL, B2B_URL, start_date, end_date, show_debug)
+    st.session_state["report"] = report
+
+report = st.session_state.get("report", None)
+
+if report is not None and not report.empty:
+    st.subheader("📊 Business Loss Summary Metrics")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Unique Variants", report["variant_id"].nunique())
+    c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
+    c3.metric("Avg DRR", round(report["drr"].mean(), 1))
+    c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
+    st.markdown("### 🧾 Variant-wise Business Loss")
+    st.dataframe(report[["variant_label", "sku", "latest_inventory", "b2b_inventory", "doh",
+                         "days_out_of_stock", "drr", "asp", "business_loss"]], use_container_width=True)
+    st.markdown("### 🥧 Contribution to Total Business Loss")
+    total_loss = report["business_loss"].sum()
+    pie_df = report[report["business_loss"] > 0.03 * total_loss]
+    if not pie_df.empty:
+        fig = px.pie(pie_df, names="variant_label", values="business_loss",
+                     title="Contribution to Total Business Loss (Active SKUs)",
+                     color_discrete_sequence=px.colors.sequential.RdBu)
+        st.plotly_chart(fig, use_container_width=True)
+    st.markdown("---")
+    st.subheader("🏭 Live Warehouse Breakdown from BigQuery")
+    sku_options = report["sku"].unique().tolist()
+    selected_sku = st.selectbox("Select SKU for Warehouse Breakdown:", options=sku_options)
+    if selected_sku:
+        st.info(f"Fetching live warehouse data for SKU: `{selected_sku}`")
+        try:
+            warehouse_df = fetch_warehouse_summary(selected_sku)
+            if not warehouse_df.empty:
+                def highlight_blocked(val):
+                    color = "#FF9999" if val > 50 else "#FFF6A5" if val > 20 else "#C6F6C6"
+                    return f"background-color: {color}"
+                st.dataframe(
+                    warehouse_df.style.applymap(highlight_blocked, subset=["Blocked_%"]).format({
+                        "Total_Inventory": "{:,.0f}",
+                        "Blocked_Inventory": "{:,.0f}",
+                        "Available_Inventory": "{:,.0f}",
+                        "Blocked_%": "{:.1f}%",
+                        "Business_Loss_(₹)": "₹{:,.0f}"
+                    }),
+                    use_container_width=True
+                )
+            else:
+                st.warning("No warehouse data found for this SKU in BigQuery.")
+        except Exception as e:
+            st.error(f"Error fetching warehouse data: {e}")
+else:
+    st.info("Please calculate business loss first using the 🚀 button.")
