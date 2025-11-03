@@ -30,10 +30,28 @@ def fetch_warehouse_summary(sku):
         SELECT 
           Company_Name,
           SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
-          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'true' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Blocked_Inventory,
-          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'false' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Available_Inventory
+          SUM(
+            CASE 
+              WHEN LOWER(CAST(Locked AS STRING)) = 'true'
+                   AND LOWER(CAST(Status AS STRING)) = 'available'
+                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+              THEN CAST(Quantity AS FLOAT64)
+              ELSE 0
+            END
+          ) AS Blocked_Inventory,
+          SUM(
+            CASE 
+              WHEN LOWER(CAST(Locked AS STRING)) = 'false'
+                   AND LOWER(CAST(Status AS STRING)) = 'available'
+                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+              THEN CAST(Quantity AS FLOAT64)
+              ELSE 0
+            END
+          ) AS Available_Inventory
         FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
         WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
+              AND LOWER(CAST(Status AS STRING)) = 'available'
+              AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
         GROUP BY Company_Name
         ORDER BY Total_Inventory DESC
     """
@@ -271,3 +289,4 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
