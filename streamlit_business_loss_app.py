@@ -16,9 +16,14 @@ B2B_URL       = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W
 # -------------------------------
 # BIGQUERY CONNECTION
 # -------------------------------
-@st.cache_resource
+@st.cache_data(ttl=300)
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
+    # Reuse cached BigQuery client safely
+    creds_dict = st.secrets["bigquery"]
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    bq_client = bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
+
     query = f"""
         SELECT 
           Company_Name,
@@ -36,10 +41,11 @@ def fetch_warehouse_summary(sku):
         GROUP BY Company_Name
         ORDER BY Total_Inventory DESC
     """
-    df = client.query(query).to_dataframe()
+
+    df = bq_client.query(query).to_dataframe()
 
     if not df.empty:
-        # Optional: compute a simple business loss metric placeholder
+        # Optional: add a simple business loss placeholder metric
         df["Business_Loss_(₹)"] = (df["Total_Inventory"] - df["Available_Inventory"]) * 200
 
     return df.fillna(0)
@@ -271,6 +277,7 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
 
 
