@@ -23,91 +23,25 @@ def get_bq_client():
 
 client = get_bq_client()
 
-# -------------------------------
-# BIGQUERY FUNCTION
-# -------------------------------
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
-    # keep same caller API; just clean lightly to be robust
-    sku = str(sku).strip().upper()
-
     query = f"""
-        -- Blocked inventory (clean SKU + standardized locations)
-        WITH blocked AS (
-            SELECT
-              REPLACE(REPLACE(TRIM(SKU), "'", ""), "‘", "") AS Clean_SKU,
-              CASE 
-                WHEN Location = 'Heavenly Secrets Private Limited - Emiza Bilaspur' THEN 'Bilaspur'
-                WHEN Location = 'Heavenly Secrets Private Limited - Bangalore'      THEN 'Bangalore'
-                WHEN Location = 'Heavenly Secrets Pvt Ltd - Kolkata'                 THEN 'Kolkata'
-                WHEN Location = 'Heavenly Secrets Private Limited - Mumbai - B2B'    THEN 'Mumbai B2B'
-                ELSE Location
-              END AS Warehouse,
-              SUM(CAST(Total_Blocked_Inventory AS FLOAT64)) AS Blocked_Inventory
-            FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
-            WHERE REPLACE(REPLACE(TRIM(SKU), "'", ""), "‘", "") = '{sku}'
-            GROUP BY Warehouse, Clean_SKU
-        ),
-
-        -- Available inventory (your original filters)
-        available AS (
-            SELECT
-              CASE 
-                WHEN Company_Name = 'Heavenly Secrets Private Limited - Emiza Bilaspur' THEN 'Bilaspur'
-                WHEN Company_Name = 'Heavenly Secrets Private Limited - Bangalore'      THEN 'Bangalore'
-                WHEN Company_Name = 'Heavenly Secrets Pvt Ltd - Kolkata'                 THEN 'Kolkata'
-                WHEN Company_Name = 'Heavenly Secrets Private Limited - Mumbai - B2B'    THEN 'Mumbai B2B'
-                ELSE Company_Name
-              END AS Warehouse,
-              SAFE_CAST(Sku AS STRING) AS Sku,
-              SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory
-            FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
-            WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
-              AND LOWER(CAST(Status AS STRING)) = 'available'
-              AND (SAFE_CAST(GreaterThanEig AS BOOL) OR SAFE_CAST(GREATERTHANEIG AS BOOL)) = TRUE
-            GROUP BY Warehouse, Sku
-        ),
-
-        -- Ensure we show ALL warehouses that exist in either table
-        all_warehouses AS (
-            SELECT DISTINCT Warehouse FROM blocked
-            UNION DISTINCT
-            SELECT DISTINCT Warehouse FROM available
-        )
-
-        SELECT
-          w.Warehouse            AS Company_Name,
-          '{sku}'                AS Sku,
-          IFNULL(a.Total_Inventory,   0) AS Total_Inventory,
-          IFNULL(b.Blocked_Inventory, 0) AS Blocked_Inventory,
-          (IFNULL(a.Total_Inventory, 0) - IFNULL(b.Blocked_Inventory, 0)) AS Available_Inventory
-        FROM all_warehouses w
-        LEFT JOIN available a ON w.Warehouse = a.Warehouse
-        LEFT JOIN blocked  b ON w.Warehouse = b.Warehouse
-        ORDER BY w.Warehouse
+        SELECT 
+          Company_Name,
+          SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
+          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'true' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Blocked_Inventory,
+          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'false' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Available_Inventory
+        FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
+        WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
+        GROUP BY Company_Name
+        ORDER BY Total_Inventory DESC
     """
     df = client.query(query).to_dataframe()
-
     if not df.empty:
-        # same post-calcs as before
-        df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"].replace(0, pd.NA) * 100).fillna(0).round(1)
+        df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
         df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
-
-        # Append TOTAL row (sum across numeric columns)
-        total_row = pd.DataFrame({
-            "Company_Name": ["TOTAL"],
-            "Sku": [sku],
-            "Total_Inventory": [df["Total_Inventory"].sum()],
-            "Blocked_Inventory": [df["Blocked_Inventory"].sum()],
-            "Available_Inventory": [df["Available_Inventory"].sum()],
-            "Blocked_%": [
-                (df["Blocked_Inventory"].sum() / df["Total_Inventory"].sum() * 100) if df["Total_Inventory"].sum() > 0 else 0
-            ],
-            "Business_Loss_(₹)": [df["Business_Loss_(₹)"].sum()]
-        })
-        df = pd.concat([df, total_row], ignore_index=True)
-
     return df.fillna(0)
+
 # -------------------------------
 # HELPERS
 # -------------------------------
@@ -150,6 +84,7 @@ def reshape_inventory(sheet_url, start_date=None, end_date=None):
 # BUSINESS LOSS CALCULATION
 # -------------------------------
 def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end_date, show_debug=False):
+    # === Inventory logic (unchanged)
     tidy = reshape_inventory(inventory_url, start_date, end_date)
     tidy = tidy[tidy["status"] == "active"]
 
@@ -158,6 +93,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     latest_inv.rename(columns={"inventory": "latest_inventory"}, inplace=True)
     report = pd.merge(oos_days, latest_inv, on="variant_id", how="outer").fillna(0)
 
+    # === ARR/DRR logic (unchanged)
     arr_drr = pd.read_csv(arr_drr_url)
     arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
     arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
@@ -165,11 +101,15 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
+    # === B2B logic (same as before, latest date-based read)
     b2b_raw = pd.read_csv(b2b_url)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
+
+    # Identify rows containing dates (like 17-07, 18-07)
     date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[date_mask].copy()
 
+    # Extract latest date row for B2B inventory
     if not b2b_data.empty:
         b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
         latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
@@ -181,39 +121,38 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
+    # === NEW: extract metadata from same b2b_raw (same logic style)
     header_map = {
         "SKU CODE": "sku",
         "PRODUCT NAME": "product_name_b2b",
         "SIZE": "size_b2b",
         "CATEGORY": "category_b2b"
     }
-
     meta_rows = b2b_raw[b2b_raw.iloc[:, 0].astype(str).str.strip().str.upper().isin(header_map.keys())].copy()
+
     if not meta_rows.empty:
         meta_rows["__label__"] = meta_rows.iloc[:, 0].astype(str).str.strip().str.upper()
-        meta_t = meta_rows.set_index("__label__").iloc[:, 1:].T
+        meta_t = meta_rows.set_index("__label__").iloc[:, 1:].T  # skip first column, transpose SKU columns
         meta_t = meta_t.rename(columns=header_map)
-        for col in ["sku", "product_name_b2b", "size_b2b", "category_b2b"]:
-            if col not in meta_t.columns:
-                meta_t[col] = None
-        if "sku" in meta_t.columns:
-            meta_t["sku"] = meta_t["sku"].apply(clean_sku)
-            b2b_meta = meta_t.dropna(subset=["sku"], how="any")
-        else:
-            b2b_meta = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
+        meta_t["sku"] = meta_t["sku"].apply(clean_sku)
+        b2b_meta = meta_t.dropna(subset=["sku"])
     else:
         b2b_meta = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
 
+    # Merge metadata only where SKU exists — no blanks/zeros
     b2b_enriched = pd.merge(b2b_latest, b2b_meta, on="sku", how="left")
 
+    # === Merge ARR/DRR and B2B data into report
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
                       on="variant_id", how="left")
     report["sku"] = report["sku"].apply(clean_sku)
     report = pd.merge(report, b2b_enriched, on="sku", how="left").fillna(0)
 
+    # === Numeric conversions (unchanged)
     for col in ["drr", "asp", "latest_inventory"]:
         report[col] = pd.to_numeric(report[col], errors="coerce").fillna(0)
 
+    # === Calculations (unchanged)
     report["business_loss"] = report["days_out_of_stock"] * report["drr"] * report["asp"]
     report["doh"] = report.apply(lambda x: math.ceil(x["latest_inventory"]/x["drr"]) if x["drr"] > 0 else 0, axis=1)
     report["variant_label"] = report.apply(
@@ -224,6 +163,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     if show_debug:
         with st.expander("🧩 Debug Preview", expanded=False):
             st.dataframe(report.head(10))
+            st.write("B2B metadata sample:")
             st.dataframe(b2b_meta.head())
 
     return report.fillna(0)
@@ -249,6 +189,9 @@ if st.button("🚀 Calculate Business Loss"):
 
 report = st.session_state.get("report", None)
 
+# -------------------------------
+# VISUALIZATION SECTION
+# -------------------------------
 if report is not None and not report.empty:
     st.subheader("📊 Business Loss Summary Metrics")
     c1, c2, c3, c4 = st.columns(4)
@@ -269,7 +212,7 @@ if report is not None and not report.empty:
     st.markdown("### 🧾 Variant-wise Business Loss")
     display_cols = [
         "variant_label",
-        "sku", "product_name_b2b", "size_b2b", "category_b2b",
+        "sku", "product_name_b2b", "size_b2b", "category_b2b",  # added fields
         "latest_inventory", "b2b_inventory", "doh",
         "days_out_of_stock", "drr", "asp", "business_loss"
     ]
@@ -294,16 +237,10 @@ if report is not None and not report.empty:
     total_loss = report["business_loss"].sum()
     pie_df = report[report["business_loss"] > 0.03 * total_loss]
     if not pie_df.empty:
-        fig = px.pie(
-            pie_df,
-            names="variant_label",
-            values="business_loss",
-            title="Contribution to Total Business Loss (Active SKUs)",
-            color_discrete_sequence=px.colors.sequential.RdBu
-        )
+        fig = px.pie(pie_df, names="variant_label", values="business_loss",
+                     title="Contribution to Total Business Loss (Active SKUs)",
+                     color_discrete_sequence=px.colors.sequential.RdBu)
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No significant contributors to display in pie chart.")
 
     # --- WAREHOUSE BREAKDOWN (BIGQUERY) ---
     st.markdown("---")
@@ -319,6 +256,7 @@ if report is not None and not report.empty:
                 def highlight_blocked(val):
                     color = "#FF9999" if val > 50 else "#FFF6A5" if val > 20 else "#C6F6C6"
                     return f"background-color: {color}"
+
                 st.dataframe(
                     warehouse_df.style.applymap(highlight_blocked, subset=["Blocked_%"]).format({
                         "Total_Inventory": "{:,.0f}",
@@ -333,5 +271,6 @@ if report is not None and not report.empty:
                 st.warning("No warehouse data found for this SKU in BigQuery.")
         except Exception as e:
             st.error(f"Error fetching warehouse data: {e}")
+
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
