@@ -16,31 +16,37 @@ B2B_URL       = "https://docs.google.com/spreadsheets/d/1nLdtjYwVD1AFa1VqCUlPS2W
 # -------------------------------
 # BIGQUERY CONNECTION
 # -------------------------------
-@st.cache_resource
-def get_bq_client():
-    creds_dict = st.secrets["bigquery"]
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    return bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
-
-client = get_bq_client()
-
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
+    # Reuse cached BigQuery client safely
+    creds_dict = st.secrets["bigquery"]
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    bq_client = bigquery.Client(credentials=credentials, project=creds_dict["project_id"])
+
     query = f"""
         SELECT 
           Company_Name,
           SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
-          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'true' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Blocked_Inventory,
-          SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'false' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Available_Inventory
+          SUM(
+            CASE 
+              WHEN LOWER(CAST(Status AS STRING)) = 'available'
+                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+              THEN CAST(Quantity AS FLOAT64)
+              ELSE 0
+            END
+          ) AS Available_Inventory
         FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
         WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
         GROUP BY Company_Name
         ORDER BY Total_Inventory DESC
     """
-    df = client.query(query).to_dataframe()
+
+    df = bq_client.query(query).to_dataframe()
+
     if not df.empty:
-        df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
+        # Optional: add a simple business loss placeholder metric
+        df["Business_Loss_(₹)"] = (df["Total_Inventory"] - df["Available_Inventory"]) * 200
+
     return df.fillna(0)
 
 # -------------------------------
@@ -271,4 +277,5 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
