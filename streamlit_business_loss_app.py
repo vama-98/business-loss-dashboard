@@ -24,23 +24,27 @@ def get_bq_client():
 client = get_bq_client()
 
 @st.cache_data(ttl=300)
+@st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
     query = f"""
         SELECT 
-          Company_Name,
+          SAFE_CAST(Sku AS STRING) AS Sku,
           SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
           SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'true' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Blocked_Inventory,
           SUM(CASE WHEN LOWER(CAST(Locked AS STRING)) = 'false' THEN CAST(Quantity AS FLOAT64) ELSE 0 END) AS Available_Inventory
         FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
         WHERE SAFE_CAST(Sku AS STRING) = '{sku}'
-        GROUP BY Company_Name
+          AND LOWER(CAST(Status AS STRING)) = 'available'
+          AND SAFE_CAST(Greaterthaneig AS BOOL) = TRUE
+        GROUP BY Sku
         ORDER BY Total_Inventory DESC
     """
     df = client.query(query).to_dataframe()
     if not df.empty:
         df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200
+        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
     return df.fillna(0)
+
 
 # -------------------------------
 # HELPERS
@@ -266,3 +270,4 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
