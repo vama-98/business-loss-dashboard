@@ -29,18 +29,33 @@ client = get_bq_client()
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
     query = f"""
+        -- Clean and standardize blocked data
         WITH blocked AS (
             SELECT
-              TRIM(REPLACE(SKU, "`", "")) AS Clean_SKU,
-              Location AS Company_Name,
+              TRIM(REPLACE(SKU, "'", "")) AS Clean_SKU,
+              CASE 
+                WHEN Location = 'Heavenly Secrets Private Limited - Emiza Bilaspur' THEN 'Bilaspur'
+                WHEN Location = 'Heavenly Secrets Private Limited - Bangalore' THEN 'Bangalore'
+                WHEN Location = 'Heavenly Secrets Pvt Ltd - Kolkata' THEN 'Kolkata'
+                WHEN Location = 'Heavenly Secrets Private Limited - Mumbai - B2B' THEN 'Mumbai B2B'
+                ELSE Location
+              END AS Company_Name,
               SUM(CAST(Total_Blocked_Inventory AS FLOAT64)) AS Blocked_Inventory
             FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
             WHERE TRIM(REPLACE(SKU, "'", "")) = '{sku}'
             GROUP BY Company_Name, Clean_SKU
         ),
+
+        -- Get available inventory from Live_Inventory_Report
         available AS (
             SELECT
-              Company_Name,
+              CASE 
+                WHEN Company_Name = 'Heavenly Secrets Private Limited - Emiza Bilaspur' THEN 'Bilaspur'
+                WHEN Company_Name = 'Heavenly Secrets Private Limited - Bangalore' THEN 'Bangalore'
+                WHEN Company_Name = 'Heavenly Secrets Pvt Ltd - Kolkata' THEN 'Kolkata'
+                WHEN Company_Name = 'Heavenly Secrets Private Limited - Mumbai - B2B' THEN 'Mumbai B2B'
+                ELSE Company_Name
+              END AS Company_Name,
               SAFE_CAST(Sku AS STRING) AS Sku,
               SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory
             FROM `shopify-pubsub-project.adhoc_data_asia.Live_Inventory_Report`
@@ -48,32 +63,39 @@ def fetch_warehouse_summary(sku):
               AND LOWER(CAST(Status AS STRING)) = 'available'
               AND (SAFE_CAST(GreaterThanEig AS BOOL) OR SAFE_CAST(GREATERTHANEIG AS BOOL)) = TRUE
             GROUP BY Company_Name, Sku
+        ),
+
+        -- Merge both datasets, ensuring all warehouses appear
+        all_locations AS (
+            SELECT DISTINCT Company_Name FROM available
+            UNION DISTINCT
+            SELECT DISTINCT Company_Name FROM blocked
         )
+
         SELECT
-          a.Company_Name,
-          a.Sku,
-          a.Total_Inventory,
+          loc.Company_Name,
+          '{sku}' AS Sku,
+          IFNULL(a.Total_Inventory, 0) AS Total_Inventory,
           IFNULL(b.Blocked_Inventory, 0) AS Blocked_Inventory,
-          (a.Total_Inventory - IFNULL(b.Blocked_Inventory, 0)) AS Available_Inventory
-        FROM available a
-        LEFT JOIN blocked b
-          ON a.Company_Name = b.Company_Name
-          AND a.Sku = b.Clean_SKU
-        ORDER BY a.Total_Inventory DESC
+          (IFNULL(a.Total_Inventory, 0) - IFNULL(b.Blocked_Inventory, 0)) AS Available_Inventory
+        FROM all_locations loc
+        LEFT JOIN available a USING (Company_Name)
+        LEFT JOIN blocked b USING (Company_Name)
+        ORDER BY loc.Company_Name
     """
 
     df = client.query(query).to_dataframe()
 
     if not df.empty:
         df["Blocked_%"] = (
-            df["Blocked_Inventory"] / df["Total_Inventory"] * 100
-        ).replace([float("inf"), -float("inf")], 0).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200
+            df["Blocked_Inventory"] / df["Total_Inventory"].replace(0, pd.NA) * 100
+        ).fillna(0).round(1)
+        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # Placeholder metric
 
-        # ✅ Add total row at the end
+        # ✅ Add total row at bottom
         total_row = pd.DataFrame({
             "Company_Name": ["TOTAL"],
-            "Sku": [df["Sku"].iloc[0]],
+            "Sku": [sku],
             "Total_Inventory": [df["Total_Inventory"].sum()],
             "Blocked_Inventory": [df["Blocked_Inventory"].sum()],
             "Available_Inventory": [df["Available_Inventory"].sum()],
@@ -86,6 +108,7 @@ def fetch_warehouse_summary(sku):
         df = pd.concat([df, total_row], ignore_index=True)
 
     return df.fillna(0)
+
 
 # -------------------------------
 # HELPERS
@@ -314,6 +337,7 @@ if report is not None and not report.empty:
             st.error(f"Error fetching warehouse data: {e}")
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
 
 
 
