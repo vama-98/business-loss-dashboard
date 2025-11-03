@@ -100,14 +100,15 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
-    # === B2B ===
+    # === B2B SHEET PARSING ===
     b2b_raw = pd.read_csv(b2b_url)
     b2b_raw.columns = b2b_raw.columns.map(str).str.strip().str.upper()
 
-    # Identify rows containing dates
+    # Identify rows containing dates (like 17-07)
     date_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[date_mask].copy()
 
+    # --- Get latest B2B inventory row ---
     if not b2b_data.empty:
         b2b_data["parsed_date"] = pd.to_datetime(b2b_data.iloc[:, 0], format="%d-%m", errors="coerce")
         latest_row = b2b_data.loc[b2b_data["parsed_date"].idxmax()]
@@ -119,41 +120,30 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     b2b_latest["sku"] = b2b_latest["sku"].apply(clean_sku)
     b2b_latest["b2b_inventory"] = pd.to_numeric(b2b_latest["b2b_inventory"], errors="coerce").fillna(0)
 
-    # === Metadata Extraction (Fixed and Robust)
-    header_map = {
-        "SKU CODE": "sku",
-        "PRODUCT NAME": "product_name_b2b",
-        "SIZE": "size_b2b",
-        "CATEGORY": "category_b2b"
-    }
+    # --- Extract product metadata from top rows (before date rows) ---
+    meta_rows = b2b_raw[~date_mask].copy()
+    meta_rows = meta_rows.dropna(how="all")
 
-    upper_cols = [str(c).strip().upper() for c in b2b_raw.columns]
+    meta_dict = {}
+    for label in ["SKU CODE", "PRODUCT NAME", "SIZE", "CATEGORY"]:
+        row = meta_rows[meta_rows.iloc[:, 0].astype(str).str.strip().str.upper() == label]
+        if not row.empty:
+            meta_dict[label] = row.iloc[0, 1:].values.tolist()
 
-    if any(h in upper_cols for h in header_map.keys()):
-        # Wide format (normal columns)
-        possible_cols = [c for c in header_map.keys() if c in b2b_raw.columns]
-        b2b_meta = b2b_raw[possible_cols].rename(columns=header_map)
-        b2b_meta["sku"] = b2b_meta["sku"].apply(clean_sku)
+    if "SKU CODE" in meta_dict:
+        meta_df = pd.DataFrame({
+            "sku": [clean_sku(x) for x in meta_dict.get("SKU CODE", [])],
+            "product_name_b2b": meta_dict.get("PRODUCT NAME", []),
+            "size_b2b": meta_dict.get("SIZE", []),
+            "category_b2b": meta_dict.get("CATEGORY", []),
+        })
     else:
-        # Transposed format (metadata in rows)
-        meta_rows = b2b_raw[b2b_raw.iloc[:, 0].astype(str).str.strip().str.upper().isin(header_map.keys())].copy()
-        if not meta_rows.empty:
-            meta_rows["__label__"] = meta_rows.iloc[:, 0].astype(str).str.strip().str.upper()
-            meta_t = meta_rows.set_index("__label__").iloc[:, 1:].T
-            meta_t = meta_t.rename(columns=header_map)
-            if "sku" in meta_t.columns:
-                meta_t["sku"] = meta_t["sku"].apply(clean_sku)
-            b2b_meta = meta_t.dropna(subset=["sku"]) if "sku" in meta_t.columns else pd.DataFrame()
-        else:
-            b2b_meta = pd.DataFrame()
+        meta_df = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
 
-    for col in ["sku", "product_name_b2b", "size_b2b", "category_b2b"]:
-        if col not in b2b_meta.columns:
-            b2b_meta[col] = ""
+    # --- Merge metadata and inventory ---
+    b2b_enriched = pd.merge(b2b_latest, meta_df, on="sku", how="left")
 
-    b2b_enriched = pd.merge(b2b_latest, b2b_meta, on="sku", how="left")
-
-    # === Merge ARR/DRR and B2B
+    # === Merge ARR/DRR and B2B ===
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
                       on="variant_id", how="left")
     report["sku"] = report["sku"].apply(clean_sku)
@@ -173,7 +163,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
         with st.expander("🧩 Debug Preview", expanded=False):
             st.dataframe(report.head(10))
             st.write("B2B metadata sample:")
-            st.dataframe(b2b_meta.head())
+            st.dataframe(meta_df.head())
 
     return report.fillna(0)
 
