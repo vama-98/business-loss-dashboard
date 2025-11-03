@@ -100,29 +100,33 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
     # -------------------------------
-    # B2B: HEADER METADATA FIXED
+    # B2B: HEADER METADATA (FINAL FIX)
     # -------------------------------
-    b2b_raw = pd.read_csv(b2b_url, header=None)  # <-- important fix
+    b2b_raw = pd.read_csv(b2b_url, header=None)
     b2b_raw.columns = b2b_raw.columns.map(str)
 
     needed_labels = {"SKU CODE": "sku", "PRODUCT NAME": "product_name_b2b",
                      "SIZE": "size_b2b", "CATEGORY": "category_b2b"}
+
     hdr = b2b_raw[b2b_raw.iloc[:, 0].astype(str).str.strip().str.upper().isin(list(needed_labels.keys()))].copy()
 
     if not hdr.empty:
         hdr["__label__"] = hdr.iloc[:, 0].astype(str).str.strip().str.upper()
-        # ✅ FIXED LINE HERE
-        meta_t = hdr.set_index("__label__").drop(columns=["0"], errors="ignore").T
+
+        # ✅ Skip first column (label names) and transpose SKU columns only
+        meta_t = hdr.set_index("__label__").iloc[:, 1:].T
         meta_t = meta_t.rename(columns=needed_labels)
+
         for col in ["sku", "product_name_b2b", "size_b2b", "category_b2b"]:
             if col not in meta_t.columns:
                 meta_t[col] = None
         meta_t["sku"] = meta_t["sku"].apply(clean_sku)
+
         b2b_meta = meta_t[["sku", "product_name_b2b", "size_b2b", "category_b2b"]].copy().dropna(subset=["sku"])
     else:
         b2b_meta = pd.DataFrame(columns=["sku", "product_name_b2b", "size_b2b", "category_b2b"])
 
-    # Extract last numerical row for B2B inventory
+    # Extract last numerical inventory row
     numeric_mask = b2b_raw.iloc[:, 0].astype(str).str.match(r"\d{2}-\d{2}")
     b2b_data = b2b_raw[numeric_mask].copy()
     if not b2b_data.empty:
@@ -136,7 +140,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
     b2b_enriched = pd.merge(last_row, b2b_meta, on="sku", how="left")
 
-    # Merge ARR/DRR & B2B data
+    # Merge ARR/DRR & B2B
     report = pd.merge(report, arr_drr[["variant_id", "product_title", "drr", "asp", "sku"]],
                       on="variant_id", how="left")
     report["sku"] = report["sku"].apply(clean_sku)
