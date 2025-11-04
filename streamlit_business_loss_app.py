@@ -241,73 +241,117 @@ if report is not None and not report.empty:
                      color_discrete_sequence=px.colors.sequential.RdBu)
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- WAREHOUSE BREAKDOWN ---
+
+    # --- UNIFIED WAREHOUSE + BLOCKED INVENTORY SECTION ---
     st.markdown("---")
-    st.subheader("🏭 Live Warehouse Breakdown from BigQuery")
-    sku_options = report["sku"].unique().tolist()
-    selected_sku = st.selectbox("Select SKU for Warehouse Breakdown:", options=sku_options)
-
-    if selected_sku:
-        st.info(f"Fetching live warehouse data for SKU: `{selected_sku}`")
-        try:
-            warehouse_df = fetch_warehouse_summary(selected_sku)
-            if not warehouse_df.empty:
-                def highlight_blocked(val):
-                    color = "#FF9999" if val > 50 else "#FFF6A5" if val > 20 else "#C6F6C6"
-                    return f"background-color: {color}"
-
-                st.dataframe(
-                    warehouse_df.style.applymap(highlight_blocked, subset=["Blocked_%"]).format({
-                        "Total_Inventory": "{:,.0f}",
-                        "Blocked_Inventory": "{:,.0f}",
-                        "Available_Inventory": "{:,.0f}",
-                        "Blocked_%": "{:.1f}%",
-                        "Business_Loss_(₹)": "₹{:,.0f}"
-                    }),
-                    use_container_width=True
-                )
-            else:
-                st.warning("No warehouse data found for this SKU in BigQuery.")
-        except Exception as e:
-            st.error(f"Error fetching warehouse data: {e}")
-
-    # --- BLOCKED INVENTORY TABLE (Below Warehouse Breakdown) ---
-    st.markdown("---")
-    st.subheader("🚫 Blocked Inventory (from BigQuery)")
+    st.subheader("🏭 Live Warehouse + Blocked Inventory (from BigQuery)")
 
     @st.cache_data(ttl=600)
-    def fetch_blocked_inventory():
+    def fetch_blocked_inventory_clean():
         query = """
-            SELECT 
-              Location,
-              Product_Name,
-              SKU,
-              EAN,
-              Total_Blocked_Inventory
+            SELECT Location, Product_Name, SKU, EAN, Total_Blocked_Inventory
             FROM `shopify-pubsub-project.adhoc_data_asia.BlockedInv`
             WHERE Total_Blocked_Inventory IS NOT NULL
-            ORDER BY Total_Blocked_Inventory DESC
         """
         df = client.query(query).to_dataframe()
-        df["SKU"] = df["SKU"].astype(str).str.replace("`", "").str.strip()
+        df["SKU"] = df["SKU"].astype(str).str.replace("`", "").str.strip().str.upper()
         df["Total_Blocked_Inventory"] = pd.to_numeric(df["Total_Blocked_Inventory"], errors="coerce").fillna(0)
         if "EAN" in df.columns:
             df.drop(columns=["EAN"], inplace=True)
+        location_map = {
+            "Heavenly Secrets Private Limited - Bangalore ": "Bangalore",
+            "Heavenly Secrets Private Limited - Mumbai - B2B": "Mumbai B2B",
+            "Heavenly Secrets Pvt Ltd - Kolkata": "Kolkata",
+            "Heavenly Secrets Private Limited - Emiza Bilaspur": "Bilaspur",
+        }
+        df["Location"] = df["Location"].replace(location_map)
+        df["Location"] = df["Location"].astype(str).str.strip()
         return df.fillna("")
 
+    # ✅ Fetch all blocked data and live SKUs
     try:
-        blocked_df = fetch_blocked_inventory()
-        if not blocked_df.empty:
-            st.dataframe(
-                blocked_df.style.format({
-                    "Total_Blocked_Inventory": "{:,.0f}"
-                }),
-                use_container_width=True
-            )
-        else:
-            st.warning("No blocked inventory records found.")
+        blocked_df_all = fetch_blocked_inventory_clean()
+        blocked_skus = blocked_df_all["SKU"].unique().tolist()
+        product_titles = sorted(blocked_df_all["Product_Name"].dropna().unique().tolist())
+        live_skus = report["sku"].unique().tolist()
+        all_skus = sorted(list(set(live_skus + blocked_skus)))
     except Exception as e:
-        st.error(f"Error fetching blocked inventory data: {e}")
+        st.error(f"Error fetching blocked SKUs: {e}")
+        all_skus, product_titles = [], []
+
+    # --- Filter Controls ---
+    colsku, coltitle = st.columns(2)
+    with colsku:
+        selected_sku = st.selectbox("Select SKU (optional):", options=["None"] + all_skus)
+    with coltitle:
+        selected_title = st.selectbox("Select Product Title (optional):", options=["None"] + product_titles)
+
+    # --- Logic for Fetching ---
+    if selected_sku != "None" or selected_title != "None":
+        st.info(f"Fetching live warehouse and blocked data for selection...")
+
+        try:
+            # Initialize empty DataFrames
+            warehouse_df = pd.DataFrame()
+            blocked_filtered = pd.DataFrame()
+
+            # --- CASE 1: SKU selected ---
+            if selected_sku != "None":
+                warehouse_df = fetch_warehouse_summary(selected_sku)
+                blocked_filtered = blocked_df_all[blocked_df_all["SKU"] == selected_sku]
+
+            # --- CASE 2: Product Title selected (may include multiple SKUs) ---
+            elif selected_title != "None":
+                blocked_filtered = blocked_df_all[blocked_df_all["Product_Name"] == selected_title]
+                # Try fetching warehouse data for all SKUs under that product
+                skus_for_title = blocked_filtered["SKU"].unique().tolist()
+                all_wh = []
+                for sku in skus_for_title:
+                    temp_df = fetch_warehouse_summary(sku)
+                    temp_df["SKU"] = sku
+                    all_wh.append(temp_df)
+                if all_wh:
+                    warehouse_df = pd.concat(all_wh, ignore_index=True)
+
+            # --- Merge logic ---
+            if not warehouse_df.empty or not blocked_filtered.empty:
+                merged = pd.merge(
+                    warehouse_df,
+                    blocked_filtered[["Location", "Total_Blocked_Inventory"]],
+                    left_on="Company_Name",
+                    right_on="Location",
+                    how="outer"
+                ).fillna({"Total_Inventory": 0, "Available_Inventory": 0, "Total_Blocked_Inventory": 0})
+
+                merged.drop(columns=["Location"], inplace=True, errors="ignore")
+                merged.rename(columns={"Total_Blocked_Inventory": "Blocked_Inventory"}, inplace=True)
+
+                # ✅ Add Total = Available + Blocked
+                merged["Available_Inventory"] = merged["Available_Inventory"].astype(float)
+                merged["Blocked_Inventory"] = merged["Blocked_Inventory"].astype(float)
+                merged["Total"] = merged["Available_Inventory"] + merged["Blocked_Inventory"]
+
+                # ✅ Clean up names
+                merged["Company_Name"] = merged["Company_Name"].astype(str).str.strip()
+
+                # ✅ Display only relevant columns
+                display_cols = ["Company_Name", "Available_Inventory", "Blocked_Inventory", "Total"]
+
+                st.dataframe(
+                    merged[display_cols].style.format({
+                        "Available_Inventory": "{:,.0f}",
+                        "Blocked_Inventory": "{:,.0f}",
+                        "Total": "{:,.0f}"
+                    }),
+                    use_container_width=True
+                )
+
+            else:
+                st.warning("No matching data found for your selection.")
+
+        except Exception as e:
+            st.error(f"Error fetching merged data: {e}")
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
