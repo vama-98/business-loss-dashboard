@@ -181,33 +181,85 @@ report = st.session_state.get("report", None)
 # VISUALIZATION SECTION
 # -------------------------------
 if report is not None and not report.empty:
+    # ------------------ SUMMARY METRICS ------------------
     st.subheader("📊 Business Loss Summary Metrics")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2 = st.columns(2)
     c1.metric("Unique Variants", report["variant_id"].nunique())
-    c2.metric("Total OOS Days", int(report["days_out_of_stock"].sum()))
-    c3.metric("Avg DRR", round(report["drr"].mean(), 1))
-    c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
+    total_loss = report["business_loss"].sum()
+    c2.metric("Total Business Loss", f"₹{total_loss:,.0f}")
 
-    st.markdown("### 🧾 Variant-wise Business Loss")
+    # ------------------ ENHANCED BUSINESS LOSS TABLE ------------------
+    st.markdown("### 🧾 Variant-wise Business Loss (with Availability & Misses)")
+
+        # 🧮 Calculate Qty Misses & On-Shelf Availability
+    if start_date and end_date:
+        total_days = (end_date - start_date).days + 1
+    else:
+        total_days = 1  # fallback
+
+    # Clean product title (remove variant_id part if included)
+    report["product_title_clean"] = report["product_title"].astype(str).str.replace(r"\s*\(.*\)$", "", regex=True)
+
+    # ✅ Correct Qty Misses: DRR × Days_Out_of_Stock
+    report["qty_misses"] = (report["drr"] * report["days_out_of_stock"]).round(0)
+
+    # ✅ On-Shelf Availability = (1 - (Days_OOS / Total_Days)) × 100
+    report["on_shelf_availability"] = report.apply(
+        lambda x: round((1 - (x["days_out_of_stock"] / total_days)) * 100, 1)
+        if total_days > 0 else 0, axis=1
+    )
+
+    # Ensure integer formatting
+    report["drr"] = report["drr"].round(0)
+    report["days_out_of_stock"] = report["days_out_of_stock"].round(0)
+
+    # ✅ Define final column order (with category/size/range back)
     display_cols = [
-        "variant_label",
-        "sku", "product_name_b2b", "size_b2b", "category_b2b", "range_b2b",
+        "product_title_clean", "sku", "variant_id",
+        "size_b2b", "category_b2b", "range_b2b",
         "latest_inventory", "b2b_inventory", "doh",
-        "days_out_of_stock", "drr", "asp", "business_loss"
+        "days_out_of_stock", "drr", "asp",
+        "qty_misses", "on_shelf_availability", "business_loss"
     ]
+
+    # ✅ Rename for readability
+    rename_map = {
+        "product_title_clean": "Product Title",
+        "sku": "SKU",
+        "variant_id": "Variant ID",
+        "size_b2b": "Size",
+        "category_b2b": "Category",
+        "range_b2b": "Range",
+        "latest_inventory": "Latest Inventory",
+        "b2b_inventory": "B2B Inventory",
+        "doh": "DOH",
+        "days_out_of_stock": "Days OOS",
+        "drr": "DRR",
+        "asp": "ASP (₹)",
+        "qty_misses": "Qty Misses (Units)",
+        "on_shelf_availability": "On-Shelf Availability (%)",
+        "business_loss": "Business Loss (₹)"
+    }
+
     for c in display_cols:
         if c not in report.columns:
             report[c] = ""
+
     st.dataframe(
-        report[display_cols].style.format({
-            "latest_inventory": "{:.0f}",
-            "b2b_inventory": "{:.0f}",
-            "drr": "{:.1f}",
-            "asp": "₹{:.0f}",
-            "business_loss": "₹{:.0f}"
+        report[display_cols].rename(columns=rename_map).style.format({
+            "Latest Inventory": "{:.0f}",
+            "B2B Inventory": "{:.0f}",
+            "DOH": "{:.0f}",
+            "Days OOS": "{:.0f}",
+            "DRR": "{:.0f}",
+            "ASP (₹)": "₹{:.0f}",
+            "Qty Misses (Units)": "{:.0f}",
+            "On-Shelf Availability (%)": "{:.1f}%",
+            "Business Loss (₹)": "₹{:.0f}"
         }),
         use_container_width=True
     )
+
 
     # --- 🥧 PIE CHART FOR BUSINESS LOSS ---
     st.markdown("### 🥧 Contribution to Total Business Loss")
@@ -339,3 +391,6 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
+
+
+
