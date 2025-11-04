@@ -1,4 +1,4 @@
-# This Works for Real — Final Version with Blocked Inventory Section
+# Final Integrated Business Loss Dashboard (with Business Loss Pie + Unified Warehouse + Blocked Inventory)
 
 import pandas as pd
 import streamlit as st
@@ -27,24 +27,16 @@ client = get_bq_client()
 
 @st.cache_data(ttl=300)
 def fetch_warehouse_summary(sku):
+    """Fetch warehouse inventory summary (excluding blocked logic)"""
     query = f"""
         SELECT 
           Company_Name,
           SUM(CAST(Quantity AS FLOAT64)) AS Total_Inventory,
           SUM(
             CASE 
-              WHEN LOWER(CAST(Locked AS STRING)) = 'true'
-                   AND LOWER(CAST(Status AS STRING)) = 'available'
+              WHEN LOWER(CAST(Status AS STRING)) = 'available'
                    AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
-              THEN CAST(Quantity AS FLOAT64)
-              ELSE 0
-            END
-          ) AS Blocked_Inventory,
-          SUM(
-            CASE 
-              WHEN LOWER(CAST(Locked AS STRING)) = 'false'
-                   AND LOWER(CAST(Status AS STRING)) = 'available'
-                   AND LOWER(CAST(Greaterthaneig AS STRING)) = 'true'
+                   AND LOWER(CAST(Locked AS STRING)) = 'false'
               THEN CAST(Quantity AS FLOAT64)
               ELSE 0
             END
@@ -57,9 +49,6 @@ def fetch_warehouse_summary(sku):
         ORDER BY Total_Inventory DESC
     """
     df = client.query(query).to_dataframe()
-    if not df.empty:
-        df["Blocked_%"] = (df["Blocked_Inventory"] / df["Total_Inventory"] * 100).round(1)
-        df["Business_Loss_(₹)"] = df["Blocked_Inventory"] * 200  # placeholder metric
     return df.fillna(0)
 
 # -------------------------------
@@ -120,7 +109,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     report["variant_id"] = report["variant_id"].apply(clean_id)
 
-    # === B2B SHEET PARSING (Row-based layout) ===
+    # === B2B SHEET PARSING ===
     b2b_raw = pd.read_csv(b2b_url, header=None)
     b2b_raw = b2b_raw.applymap(lambda x: str(x).strip() if pd.notna(x) else "")
     meta_raw = b2b_raw.iloc[:5, :]
@@ -171,7 +160,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 # STREAMLIT DASHBOARD
 # -------------------------------
 st.set_page_config(page_title="Business Loss Dashboard", layout="wide")
-st.title("💸 Business Loss Dashboard (with BigQuery Drilldown + Simulation)")
+st.title("💸 Business Loss Dashboard (Unified Warehouse + Blocked Inventory)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -199,15 +188,6 @@ if report is not None and not report.empty:
     c3.metric("Avg DRR", round(report["drr"].mean(), 1))
     c4.metric("Total Business Loss", f"₹{report['business_loss'].sum():,.0f}")
 
-    def highlight_doh(row):
-        if row["latest_inventory"] == 0 or row["doh"] <= 7:
-            color = "background-color: #FFC7C7"
-        elif 8 <= row["doh"] <= 15:
-            color = "background-color: #FFF6A5"
-        else:
-            color = ""
-        return [color]*len(row)
-
     st.markdown("### 🧾 Variant-wise Business Loss")
     display_cols = [
         "variant_label",
@@ -218,29 +198,36 @@ if report is not None and not report.empty:
     for c in display_cols:
         if c not in report.columns:
             report[c] = ""
-    styled_df = (
-        report[display_cols]
-        .style.apply(highlight_doh, axis=1)
-        .format({
+    st.dataframe(
+        report[display_cols].style.format({
             "latest_inventory": "{:.0f}",
             "b2b_inventory": "{:.0f}",
             "drr": "{:.1f}",
             "asp": "₹{:.0f}",
             "business_loss": "₹{:.0f}"
-        })
+        }),
+        use_container_width=True
     )
-    st.dataframe(styled_df, use_container_width=True)
 
-    # --- PIE CHART ---
+    # --- 🥧 PIE CHART FOR BUSINESS LOSS ---
     st.markdown("### 🥧 Contribution to Total Business Loss")
     total_loss = report["business_loss"].sum()
-    pie_df = report[report["business_loss"] > 0.03 * total_loss]
-    if not pie_df.empty:
-        fig = px.pie(pie_df, names="variant_label", values="business_loss",
-                     title="Contribution to Total Business Loss (Active SKUs)",
-                     color_discrete_sequence=px.colors.sequential.RdBu)
-        st.plotly_chart(fig, use_container_width=True)
-
+    if total_loss > 0:
+        pie_df = report[report["business_loss"] > 0.03 * total_loss]
+        if not pie_df.empty:
+            fig = px.pie(
+                pie_df,
+                names="variant_label",
+                values="business_loss",
+                title="Contribution to Total Business Loss (Active SKUs)",
+                color_discrete_sequence=px.colors.sequential.RdBu
+            )
+            fig.update_traces(textposition="inside", textinfo="percent+label")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No significant contributors to business loss.")
+    else:
+        st.info("No business loss data available.")
 
     # --- UNIFIED WAREHOUSE + BLOCKED INVENTORY SECTION ---
     st.markdown("---")
@@ -288,7 +275,7 @@ if report is not None and not report.empty:
 
     # --- Logic for Fetching ---
     if selected_sku != "None" or selected_title != "None":
-        st.info(f"Fetching live warehouse and blocked data for selection...")
+        st.info("Fetching live warehouse and blocked data for selection...")
 
         try:
             # Initialize empty DataFrames
@@ -331,10 +318,8 @@ if report is not None and not report.empty:
                 merged["Blocked_Inventory"] = merged["Blocked_Inventory"].astype(float)
                 merged["Total"] = merged["Available_Inventory"] + merged["Blocked_Inventory"]
 
-                # ✅ Clean up names
                 merged["Company_Name"] = merged["Company_Name"].astype(str).str.strip()
 
-                # ✅ Display only relevant columns
                 display_cols = ["Company_Name", "Available_Inventory", "Blocked_Inventory", "Total"]
 
                 st.dataframe(
@@ -354,4 +339,3 @@ if report is not None and not report.empty:
 
 else:
     st.info("Please calculate business loss first using the 🚀 button.")
-
