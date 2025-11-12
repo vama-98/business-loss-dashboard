@@ -291,6 +291,9 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
     report["drr"] = report["drr"].round(0)
     report["days_out_of_stock"] = report["days_out_of_stock"].round(0)
     
+    # Remove duplicates based on SKU (keep first occurrence)
+    report = report.drop_duplicates(subset=['sku'], keep='first')
+    
     return report.fillna(0)
 
 # -------------------------------
@@ -328,6 +331,8 @@ if report is not None and not report.empty:
     total_loss = report["business_loss"].sum()
     c2.metric("Total Business Loss", f"₹{total_loss:,.0f}")
     total_misses = report["qty_misses"].sum()
+    #c3.metric("Total Qty Misses", f"{total_misses:,.0f} units")
+
     # ------------------ ENHANCED BUSINESS LOSS TABLE ------------------
     st.markdown("### 🧾 Variant-wise Business Loss (with Availability & Misses)")
     
@@ -336,6 +341,7 @@ if report is not None and not report.empty:
     
     # Safely get unique values for filters
     categories = ["All"]
+    ranges = ["All"]
     skus = ["All"]
     titles = ["All"]
     
@@ -344,6 +350,14 @@ if report is not None and not report.empty:
             cat_values = report["category_b2b"].dropna().astype(str)
             cat_values = cat_values[cat_values != "0"]  # Exclude zeros
             categories.extend(sorted(cat_values.unique().tolist()))
+    except Exception:
+        pass
+    
+    try:
+        if "range_b2b" in report.columns:
+            range_values = report["range_b2b"].dropna().astype(str)
+            range_values = range_values[range_values != "0"]  # Exclude zeros
+            ranges.extend(sorted(range_values.unique().tolist()))
     except Exception:
         pass
     
@@ -363,13 +377,15 @@ if report is not None and not report.empty:
     except Exception:
         pass
     
-    # Filter dropdowns
-    colf1, colf2, colf3 = st.columns(3)
+    # Filter dropdowns (4 columns now)
+    colf1, colf2, colf3, colf4 = st.columns(4)
     with colf1:
         selected_category = st.selectbox("Category", options=categories)
     with colf2:
-        selected_sku = st.selectbox("SKU", options=skus)
+        selected_range = st.selectbox("Range", options=ranges)
     with colf3:
+        selected_sku = st.selectbox("SKU", options=skus)
+    with colf4:
         selected_product = st.selectbox("Product Title", options=titles)
 
     # --- APPLY FILTERS (non-destructive) ---
@@ -382,6 +398,14 @@ if report is not None and not report.empty:
             ]
     except Exception as e:
         st.warning(f"Category filter error: {e}")
+    
+    try:
+        if selected_range != "All" and "range_b2b" in filtered_report.columns:
+            filtered_report = filtered_report[
+                filtered_report["range_b2b"].astype(str) == str(selected_range)
+            ]
+    except Exception as e:
+        st.warning(f"Range filter error: {e}")
     
     try:
         if selected_sku != "All" and "sku" in filtered_report.columns:
@@ -402,13 +426,13 @@ if report is not None and not report.empty:
     # --- SHOW FILTERED TABLE ---
     st.markdown(f"#### 📋 Business Loss Table ({len(filtered_report)} rows)")
     
-    # Define column order
+    # Define column order (without sparkline)
     display_cols = [
         "product_title_clean", "sku", "variant_id",
-        "size_b2b", "category_b2b", "range_b2b",
+        "size_b2b", "category_b2b", "range_b2b","business_loss",
         "latest_inventory", "b2b_inventory", "doh",
         "days_out_of_stock", "drr", "asp",
-        "qty_misses", "on_shelf_availability", "business_loss"
+        "qty_misses", "on_shelf_availability"
     ]
     
     # Rename for readability
@@ -419,6 +443,7 @@ if report is not None and not report.empty:
         "size_b2b": "Size",
         "category_b2b": "Category",
         "range_b2b": "Range",
+        "business_loss": "Business Loss (₹)",
         "latest_inventory": "Latest Inventory",
         "b2b_inventory": "B2B Inventory",
         "doh": "DOH",
@@ -426,8 +451,8 @@ if report is not None and not report.empty:
         "drr": "DRR",
         "asp": "ASP (₹)",
         "qty_misses": "Qty Misses (Units)",
-        "on_shelf_availability": "On-Shelf Availability (%)",
-        "business_loss": "Business Loss (₹)"
+        "on_shelf_availability": "On-Shelf Availability (%)"
+
     }
     
     # Ensure all columns exist
@@ -451,6 +476,123 @@ if report is not None and not report.empty:
         use_container_width=True,
         height=600
     )
+    
+    # --- 🔍 DRILL-DOWN SECTION ---
+    st.markdown("---")
+    st.markdown("### 🔍 Drill-Down Analysis")
+    st.markdown("Select a row from the table above to view detailed inventory trends and warehouse breakdown")
+    
+    # Create a selectbox with product + SKU for easy identification
+    filtered_report["display_label"] = filtered_report.apply(
+        lambda x: f"{x['product_title_clean']} - {x['sku']}" if x['product_title_clean'] else x['sku'],
+        axis=1
+    )
+    drill_options = ["None"] + filtered_report["display_label"].tolist()
+    selected_drill = st.selectbox("Select Product/SKU:", options=drill_options, key="drill_down")
+    
+    if selected_drill != "None":
+        # Get the selected row data
+        selected_row = filtered_report[filtered_report["display_label"] == selected_drill].iloc[0]
+        drill_sku = selected_row["sku"]
+        drill_product = selected_row["product_title_clean"]
+        
+        # Display header with product and SKU info
+        st.markdown(f"#### 📦 Details: **{drill_product}** | SKU: **{drill_sku}**")
+        
+        # Create two columns for side-by-side display
+        col_left, col_right = st.columns([1, 1])
+        
+        # LEFT COLUMN: Inventory Trend
+        with col_left:
+            st.markdown("##### 📈 Inventory Trend")
+            with st.spinner("Loading inventory trend..."):
+                trend_df = get_inventory_trend_from_sheet(INVENTORY_URL, drill_sku, start_date, end_date)
+            
+            if not trend_df.empty and len(trend_df) > 0:
+                # Create line chart
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=trend_df["Date"],
+                    y=trend_df["Total_Quantity"],
+                    mode='lines+markers',
+                    name='Inventory',
+                    line=dict(color='#1f77b4', width=2),
+                    marker=dict(size=4)
+                ))
+                
+                fig.update_layout(
+                    xaxis_title="Date",
+                    yaxis_title="Quantity",
+                    hovermode='x unified',
+                    template='plotly_white',
+                    height=300,
+                    margin=dict(l=10, r=10, t=10, b=10)
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Show mini stats
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Avg", f"{trend_df['Total_Quantity'].mean():,.0f}")
+                c2.metric("Max", f"{trend_df['Total_Quantity'].max():,.0f}")
+                c3.metric("Current", f"{trend_df['Total_Quantity'].iloc[-1]:,.0f}")
+            else:
+                st.info("No trend data available for this SKU")
+        
+        # RIGHT COLUMN: Warehouse Breakdown
+        with col_right:
+            st.markdown("##### 🏭 Warehouse Breakdown")
+            with st.spinner("Loading warehouse data..."):
+                try:
+                    # Fetch warehouse data
+                    warehouse_df = fetch_warehouse_summary(drill_sku)
+                    
+                    # Fetch blocked inventory
+                    blocked_df_all = fetch_blocked_inventory_clean()
+                    blocked_filtered = pd.DataFrame()
+                    if not blocked_df_all.empty:
+                        blocked_filtered = blocked_df_all[blocked_df_all["SKU"] == drill_sku]
+                    
+                    # Merge data
+                    if not warehouse_df.empty or not blocked_filtered.empty:
+                        merged = pd.merge(
+                            warehouse_df,
+                            blocked_filtered[["Location", "Total_Blocked_Inventory"]],
+                            left_on="Company_Name",
+                            right_on="Location",
+                            how="outer"
+                        ).fillna({"Total_Inventory": 0, "Available_Inventory": 0, "Total_Blocked_Inventory": 0})
+                        
+                        merged.drop(columns=["Location"], inplace=True, errors="ignore")
+                        merged.rename(columns={"Total_Blocked_Inventory": "Blocked"}, inplace=True)
+                        merged.rename(columns={"Company_Name": "Warehouse", "Available_Inventory": "Available"}, inplace=True)
+                        
+                        merged["Available"] = merged["Available"].astype(float)
+                        merged["Blocked"] = merged["Blocked"].astype(float)
+                        merged["Total"] = merged["Available"] + merged["Blocked"]
+                        
+                        display_cols_drill = ["Warehouse", "Available", "Blocked", "Total"]
+                        
+                        st.dataframe(
+                            merged[display_cols_drill].style.format({
+                                "Available": "{:,.0f}",
+                                "Blocked": "{:,.0f}",
+                                "Total": "{:,.0f}"
+                            }),
+                            use_container_width=True,
+                            height=300
+                        )
+                        
+                        # Show summary
+                        total_available = merged["Available"].sum()
+                        total_blocked = merged["Blocked"].sum()
+                        st.metric("Total Available", f"{total_available:,.0f}")
+                        st.metric("Total Blocked", f"{total_blocked:,.0f}")
+                    else:
+                        st.info("No warehouse data available")
+                        
+                except Exception as e:
+                    st.error(f"Error loading warehouse data: {e}")
 
     # --- 🥧 PIE CHART FOR BUSINESS LOSS (uses full report, not filtered) ---
     st.markdown("### 🥧 Contribution to Total Business Loss")
@@ -472,10 +614,10 @@ if report is not None and not report.empty:
     else:
         st.info("No business loss data available.")
 
-    # --- 📈 INVENTORY TREND CHART ---
+    # --- 📈 INVENTORY TREND CHART (Separate Section) ---
     st.markdown("---")
-    st.markdown("### 📈 Inventory Trend (from Google Sheets)")
-    st.markdown("Select a SKU or Product Title to view historical inventory trend")
+    st.markdown("### 📈 Inventory Trend Explorer (from Google Sheets)")
+    st.markdown("Use this section to explore trends for any product independently")
     
     # Get available options for trend analysis
     trend_skus = ["None"] + sorted(report["sku"].dropna().unique().tolist())
@@ -483,9 +625,9 @@ if report is not None and not report.empty:
     
     col_trend1, col_trend2 = st.columns(2)
     with col_trend1:
-        selected_trend_sku = st.selectbox("Select SKU for trend:", options=trend_skus, key="trend_sku")
+        selected_trend_sku = st.selectbox("Select SKU for trend:", options=trend_skus, key="trend_sku_explorer")
     with col_trend2:
-        selected_trend_product = st.selectbox("Select Product for trend:", options=trend_products, key="trend_product")
+        selected_trend_product = st.selectbox("Select Product for trend:", options=trend_products, key="trend_product_explorer")
     
     # Determine which selection to use
     trend_sku_to_use = None
@@ -536,9 +678,10 @@ if report is not None and not report.empty:
         else:
             st.warning(f"No inventory trend data found for the selected item in the date range.")
 
-    # --- 🏭 UNIFIED WAREHOUSE + BLOCKED INVENTORY SECTION ---
+    # --- 🏭 UNIFIED WAREHOUSE EXPLORER (Separate Section) ---
     st.markdown("---")
-    st.subheader("🏭 Live Warehouse + Blocked Inventory (from BigQuery)")
+    st.subheader("🏭 Warehouse Explorer: Live + Blocked Inventory (from BigQuery)")
+    st.markdown("Use this section to explore warehouse inventory for any product independently")
 
     # Fetch blocked inventory data
     try:
@@ -554,9 +697,9 @@ if report is not None and not report.empty:
     # --- Filter Controls for Warehouse Data ---
     colsku, coltitle = st.columns(2)
     with colsku:
-        selected_wh_sku = st.selectbox("Select SKU (optional):", options=["None"] + all_skus, key="wh_sku")
+        selected_wh_sku = st.selectbox("Select SKU (optional):", options=["None"] + all_skus, key="wh_sku_explorer")
     with coltitle:
-        selected_wh_title = st.selectbox("Select Product Title (optional):", options=["None"] + product_titles_blocked, key="wh_title")
+        selected_wh_title = st.selectbox("Select Product Title (optional):", options=["None"] + product_titles_blocked, key="wh_title_explorer")
 
     # --- Logic for Fetching Warehouse Data ---
     if selected_wh_sku != "None" or selected_wh_title != "None":
@@ -657,5 +800,8 @@ if report is not None and not report.empty:
 
 else:
     st.info("👆 Please calculate business loss first using the 🚀 button above.")
+
+
+
 
 
