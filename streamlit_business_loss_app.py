@@ -602,7 +602,6 @@ if report is not None and not report.empty:
         if not pie_df.empty:
             fig = px.pie(
                 pie_df,
-                names="variant_label",
                 values="business_loss",
                 title="Contribution to Total Business Loss (All SKUs)",
                 color_discrete_sequence=px.colors.sequential.RdBu
@@ -800,6 +799,7 @@ if report is not None and not report.empty:
 
 else:
     st.info("👆 Please calculate business loss first using the 🚀 button above.")
+
 
 
 
