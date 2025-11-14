@@ -95,28 +95,49 @@ def fetch_all_warehouse_inventory():
 def load_drr_data():
     """Load DRR data from Google Sheets"""
     arr_drr = pd.read_csv(ARR_DRR_URL)
+    
+    # Keep original column names first to check
+    original_cols = arr_drr.columns.tolist()
+    
+    # Now normalize column names
     arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
     
-    # Check if sku_code or sku column exists
-    if "sku_code" in arr_drr.columns:
-        arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
-    elif "sku" not in arr_drr.columns:
-        st.error("SKU column not found in DRR sheet!")
+    # Check for SKU column with various possible names
+    sku_col_found = False
+    for possible_name in ["sku_code", "sku", "sku_code", "skucode"]:
+        if possible_name in arr_drr.columns:
+            if possible_name != "sku":
+                arr_drr.rename(columns={possible_name: "sku"}, inplace=True)
+            sku_col_found = True
+            break
+    
+    if not sku_col_found:
+        st.error(f"SKU column not found! Available columns: {original_cols}")
         return pd.DataFrame()
     
-    arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
-    arr_drr["drr"] = pd.to_numeric(arr_drr["drr"], errors="coerce").fillna(0)
+    # Clean and process SKU
+    arr_drr["sku"] = arr_drr["sku"].astype(str).apply(clean_sku)
+    
+    # Process DRR column
+    if "drr" in arr_drr.columns:
+        arr_drr["drr"] = pd.to_numeric(arr_drr["drr"], errors="coerce").fillna(0)
+    else:
+        st.error("DRR column not found in the sheet!")
+        return pd.DataFrame()
     
     # Handle variant_id if exists
     if "variant_id" in arr_drr.columns:
         arr_drr["variant_id"] = arr_drr["variant_id"].apply(clean_id)
     
-    # Keep only necessary columns
-    cols_to_keep = ["sku", "drr"]
-    if "product_title" in arr_drr.columns:
-        cols_to_keep.append("product_title")
+    # Handle product_title
+    if "product_title" not in arr_drr.columns:
+        arr_drr["product_title"] = "Unknown Product"
     
-    return arr_drr[cols_to_keep].copy()
+    # Keep only necessary columns and remove rows with zero/missing SKU or DRR
+    result = arr_drr[["sku", "product_title", "drr"]].copy()
+    result = result[(result["sku"] != "") & (result["sku"] != "0") & (result["drr"] > 0)]
+    
+    return result
 
 # -------------------------------
 # DOH CALCULATION
