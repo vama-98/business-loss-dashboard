@@ -119,13 +119,21 @@ def calculate_warehouse_doh():
     warehouse_inv = fetch_all_warehouse_inventory()
     drr_data = load_drr_data()
     
+    # Ensure SKU columns are properly formatted before merge
+    warehouse_inv["sku"] = warehouse_inv["SKU"].astype(str).str.strip().str.upper()
+    drr_data["sku"] = drr_data["sku"].astype(str).str.strip().str.upper()
+    
     # Merge inventory with DRR
     merged = pd.merge(
         warehouse_inv,
-        drr_data,
+        drr_data[["sku", "product_title", "drr"]],
         on="sku",
         how="left"
     )
+    
+    # Fill missing DRR values with 0
+    merged["drr"] = merged["drr"].fillna(0)
+    merged["product_title"] = merged["product_title"].fillna("Unknown Product")
     
     # Calculate warehouse-specific DRR
     merged["warehouse_drr"] = merged.apply(
@@ -144,6 +152,10 @@ def calculate_warehouse_doh():
     merged["drr_percentage"] = merged["Company_Name"].map(
         lambda x: WAREHOUSE_DRR_SPLIT.get(x, 0) * 100
     )
+    
+    # Remove duplicate SKU column (keep the original SKU)
+    if "SKU" in merged.columns:
+        merged = merged.drop(columns=["SKU"])
     
     return merged
 
