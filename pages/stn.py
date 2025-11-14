@@ -96,13 +96,27 @@ def load_drr_data():
     """Load DRR data from Google Sheets"""
     arr_drr = pd.read_csv(ARR_DRR_URL)
     arr_drr.columns = arr_drr.columns.str.strip().str.lower().str.replace(" ", "_")
-    arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
-    arr_drr["variant_id"] = arr_drr["variant_id"].apply(clean_id)
+    
+    # Check if sku_code or sku column exists
+    if "sku_code" in arr_drr.columns:
+        arr_drr.rename(columns={"sku_code": "sku"}, inplace=True)
+    elif "sku" not in arr_drr.columns:
+        st.error("SKU column not found in DRR sheet!")
+        return pd.DataFrame()
+    
     arr_drr["sku"] = arr_drr["sku"].apply(clean_sku)
     arr_drr["drr"] = pd.to_numeric(arr_drr["drr"], errors="coerce").fillna(0)
     
+    # Handle variant_id if exists
+    if "variant_id" in arr_drr.columns:
+        arr_drr["variant_id"] = arr_drr["variant_id"].apply(clean_id)
+    
     # Keep only necessary columns
-    return arr_drr[["sku", "product_title", "drr"]].copy()
+    cols_to_keep = ["sku", "drr"]
+    if "product_title" in arr_drr.columns:
+        cols_to_keep.append("product_title")
+    
+    return arr_drr[cols_to_keep].copy()
 
 # -------------------------------
 # DOH CALCULATION
@@ -173,6 +187,9 @@ This dashboard calculates **Days on Hand (DOH)** for each warehouse based on:
   - 36% Bilaspur | 27% Mumbai B2C | 20% Bangalore | 17% Kolkata | 0% Mumbai B2B
 """)
 
+# Add debug toggle
+show_debug = st.sidebar.checkbox("Show Debug Info", value=False)
+
 # Refresh button
 if st.button("🔄 Refresh Data"):
     st.cache_data.clear()
@@ -181,6 +198,33 @@ if st.button("🔄 Refresh Data"):
 # Load data
 with st.spinner("Loading warehouse inventory and DRR data..."):
     doh_report = calculate_warehouse_doh()
+
+# Debug section
+if show_debug:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Debug Info")
+    
+    warehouse_inv = fetch_all_warehouse_inventory()
+    drr_data = load_drr_data()
+    
+    st.sidebar.write(f"**Warehouse Inventory rows:** {len(warehouse_inv)}")
+    st.sidebar.write(f"**DRR Data rows:** {len(drr_data)}")
+    st.sidebar.write(f"**Merged rows:** {len(doh_report)}")
+    st.sidebar.write(f"**Matched SKUs:** {(doh_report['drr'] > 0).sum()}")
+    st.sidebar.write(f"**Unmatched SKUs:** {(doh_report['drr'] == 0).sum()}")
+    
+    with st.expander("🔍 Sample SKUs from Warehouse"):
+        st.write("First 10 SKUs from Warehouse:")
+        st.write(warehouse_inv[["sku", "Company_Name", "Available_Inventory"]].head(10))
+    
+    with st.expander("🔍 Sample SKUs from DRR Sheet"):
+        st.write("First 10 SKUs from DRR:")
+        st.write(drr_data[["sku", "product_title", "drr"]].head(10))
+    
+    with st.expander("🔍 Sample Mismatched SKUs"):
+        mismatched = doh_report[doh_report["drr"] == 0][["sku", "Company_Name", "Available_Inventory"]].head(10)
+        st.write("SKUs with no DRR match:")
+        st.write(mismatched)
 
 if not doh_report.empty:
     # ------------------ SUMMARY METRICS ------------------
