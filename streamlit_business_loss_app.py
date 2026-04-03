@@ -201,7 +201,7 @@ def calculate_business_loss(inventory_url, arr_drr_url, b2b_url, start_date, end
 
     # === B2B SHEET PARSING ===
     b2b_raw = pd.read_csv(b2b_url, header=None)
-    b2b_raw = b2b_raw.applymap(lambda x: str(x).strip() if pd.notna(x) else "")
+    b2b_raw = b2b_raw.map(lambda x: str(x).strip() if pd.notna(x) else "")
     
     # Extract metadata (first 5 rows)
     meta_raw = b2b_raw.iloc[:5, :]
